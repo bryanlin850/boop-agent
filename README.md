@@ -129,7 +129,7 @@ You need accounts for these. Keep the tabs open — setup will ask for credentia
 
 ```bash
 # 1. Clone + install
-git clone <your-fork-url> boop-agent
+git clone https://github.com/raroque/boop-agent.git
 cd boop-agent
 npm install
 

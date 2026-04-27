@@ -229,10 +229,20 @@ export function ComposioSection({ isDark }: { isDark: boolean }) {
   >({});
   const [toast, setToast] = useState<ToastState | null>(null);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const dismissToast = useCallback(() => {
+    if (toastTimerRef.current) {
+      clearTimeout(toastTimerRef.current);
+      toastTimerRef.current = null;
+    }
+    setToast(null);
+  }, []);
   const showToast = useCallback((message: string, tone: ToastState["tone"] = "error") => {
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
     setToast({ id: Date.now(), message, tone });
-    toastTimerRef.current = setTimeout(() => setToast(null), TOAST_TIMEOUT_MS);
+    toastTimerRef.current = setTimeout(() => {
+      toastTimerRef.current = null;
+      setToast(null);
+    }, TOAST_TIMEOUT_MS);
   }, []);
   useEffect(
     () => () => {
@@ -524,7 +534,7 @@ export function ComposioSection({ isDark }: { isDark: boolean }) {
           );
         })()
       )}
-      {toast && <Toast toast={toast} onDismiss={() => setToast(null)} isDark={isDark} />}
+      {toast && <Toast toast={toast} onDismiss={dismissToast} isDark={isDark} />}
     </section>
   );
 }
@@ -690,6 +700,7 @@ function ConnectionRow({
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(conn.alias ?? "");
   const [saving, setSaving] = useState(false);
+  const submittingRef = useRef(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const startEdit = () => {
     setDraft(conn.alias ?? "");
@@ -700,14 +711,17 @@ function ConnectionRow({
     setDraft(conn.alias ?? "");
   };
   const submit = async () => {
+    if (submittingRef.current) return;
     const alias = draft.trim();
     if (!alias || alias === (conn.alias ?? "")) {
       cancelEdit();
       return;
     }
+    submittingRef.current = true;
     setSaving(true);
     const ok = await onRename(conn.id, alias);
     setSaving(false);
+    submittingRef.current = false;
     if (ok) setEditing(false);
   };
   useEffect(() => {

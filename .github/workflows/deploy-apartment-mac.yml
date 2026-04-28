@@ -1,0 +1,47 @@
+name: Deploy Apartment Mac
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: boop-apartment-mac-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    if: github.repository == 'bryanlin850/boop-agent'
+    runs-on:
+      - self-hosted
+      - macOS
+      - boop-apartment-mac
+    timeout-minutes: 15
+
+    steps:
+      - name: Deploy runtime checkout
+        shell: bash
+        env:
+          BOOP_RUNTIME_DIR: /Users/bryan/boop-agent
+        run: |
+          set -euo pipefail
+
+          cd "$BOOP_RUNTIME_DIR"
+          git remote set-url origin https://github.com/bryanlin850/boop-agent.git
+          git fetch origin main
+
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::Runtime checkout has local changes; refusing to deploy."
+            git status --short
+            exit 1
+          fi
+
+          git checkout main
+          git pull --ff-only origin main
+          npm ci
+          npm run typecheck
+          ./scripts/restart-launchd-service.sh

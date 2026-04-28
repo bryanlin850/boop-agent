@@ -10,6 +10,10 @@ export default defineConfig(({ mode }) => {
   // even though this config file lives under debug/.
   const env = loadEnv(mode, PROJECT_ROOT, "");
   const port = Number(env.PORT ?? process.env.PORT ?? 3456);
+  const allowedHosts = (env.DEBUG_ALLOWED_HOSTS ?? process.env.DEBUG_ALLOWED_HOSTS ?? "")
+    .split(",")
+    .map((host) => host.trim())
+    .filter(Boolean);
 
   return {
     root: path.resolve(__dirname),
@@ -17,6 +21,7 @@ export default defineConfig(({ mode }) => {
     plugins: [react(), tailwindcss()],
     server: {
       port: 5173,
+      ...(allowedHosts.length > 0 ? { allowedHosts } : {}),
       proxy: {
         "/api": {
           target: `http://localhost:${port}`,

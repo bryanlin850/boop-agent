@@ -447,7 +447,8 @@ export class ComposioNeedsAuthConfigError extends Error {
   ) {
     super(
       `Toolkit "${slug}" needs an auth config — Composio doesn't host a managed OAuth app for it. ` +
-        `Create one at https://platform.composio.dev/auth-configs (select ${slug}).`,
+        `Add it via the Composio Dashboard: Toolkits → search ${slug} → Add to project → paste your OAuth credentials. ` +
+        `https://dashboard.composio.dev`,
     );
     this.name = "ComposioNeedsAuthConfigError";
   }

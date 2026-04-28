@@ -8,16 +8,18 @@ const METRICS_SCAN_LIMIT = 5000;
 export const metrics = query({
   args: {},
   handler: async (ctx) => {
-    const [messages, memories, agents, automationRuns] = await Promise.all([
+    const [messages, memories, agents, usageRecords, automationRuns] = await Promise.all([
       ctx.db.query("messages").order("desc").take(METRICS_SCAN_LIMIT),
       ctx.db.query("memoryRecords").order("desc").take(METRICS_SCAN_LIMIT),
       ctx.db.query("executionAgents").order("desc").take(METRICS_SCAN_LIMIT),
+      ctx.db.query("usageRecords").order("desc").take(METRICS_SCAN_LIMIT),
       ctx.db.query("automationRuns").order("desc").take(METRICS_SCAN_LIMIT),
     ]);
     const truncated =
       messages.length === METRICS_SCAN_LIMIT ||
       memories.length === METRICS_SCAN_LIMIT ||
       agents.length === METRICS_SCAN_LIMIT ||
+      usageRecords.length === METRICS_SCAN_LIMIT ||
       automationRuns.length === METRICS_SCAN_LIMIT;
 
     const activeMem = memories.filter((m) => m.lifecycle === "active");
@@ -27,7 +29,7 @@ export const metrics = query({
       string,
       {
         day: string;
-        agentCost: number;
+        usageCost: number;
         inputTokens: number;
         outputTokens: number;
         agentsSpawned: number;
@@ -46,7 +48,7 @@ export const metrics = query({
       if (!b) {
         b = {
           day,
-          agentCost: 0,
+          usageCost: 0,
           inputTokens: 0,
           outputTokens: 0,
           agentsSpawned: 0,
@@ -63,12 +65,15 @@ export const metrics = query({
     for (const a of agents) {
       const b = bucketFor(keyFor(a.startedAt));
       b.agentsSpawned += 1;
-      b.agentCost += a.costUsd ?? 0;
-      b.inputTokens += a.inputTokens ?? 0;
-      b.outputTokens += a.outputTokens ?? 0;
       if (a.status === "completed") b.agentsCompleted += 1;
       else if (a.status === "failed") b.agentsFailed += 1;
       else if (a.status === "cancelled") b.agentsCancelled += 1;
+    }
+    for (const r of usageRecords) {
+      const b = bucketFor(keyFor(r.createdAt));
+      b.usageCost += r.costUsd ?? 0;
+      b.inputTokens += r.inputTokens ?? 0;
+      b.outputTokens += r.outputTokens ?? 0;
     }
     for (const r of automationRuns) {
       const b = bucketFor(keyFor(r.startedAt));
@@ -95,11 +100,11 @@ export const metrics = query({
         ).length,
       },
       cost: {
-        total: agents.reduce((s, a) => s + (a.costUsd ?? 0), 0),
+        total: usageRecords.reduce((s, r) => s + (r.costUsd ?? 0), 0),
       },
       tokens: {
-        input: agents.reduce((s, a) => s + (a.inputTokens ?? 0), 0),
-        output: agents.reduce((s, a) => s + (a.outputTokens ?? 0), 0),
+        input: usageRecords.reduce((s, r) => s + (r.inputTokens ?? 0), 0),
+        output: usageRecords.reduce((s, r) => s + (r.outputTokens ?? 0), 0),
       },
       dailyBuckets,
       truncated,

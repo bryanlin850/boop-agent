@@ -40,7 +40,7 @@ export function DashboardPanel({ isDark }: { isDark: boolean }) {
       ? data.dailyBuckets.filter((d) => d.day >= cutoff)
       : data.dailyBuckets;
 
-    let agentCost = 0;
+    let usageCost = 0;
     let inputTokens = 0;
     let outputTokens = 0;
     let agentsSpawned = 0;
@@ -50,7 +50,7 @@ export function DashboardPanel({ isDark }: { isDark: boolean }) {
     let automationRuns = 0;
 
     for (const d of days) {
-      agentCost += d.agentCost;
+      usageCost += d.usageCost;
       inputTokens += d.inputTokens;
       outputTokens += d.outputTokens;
       agentsSpawned += d.agentsSpawned;
@@ -63,7 +63,7 @@ export function DashboardPanel({ isDark }: { isDark: boolean }) {
     const totalTokens = inputTokens + outputTokens;
     return {
       days,
-      cost: { total: agentCost, agents: agentCost },
+      cost: { total: usageCost, usage: usageCost },
       tokens: { input: inputTokens, output: outputTokens, total: totalTokens },
       agents: {
         total: agentsSpawned,
@@ -215,9 +215,9 @@ export function DashboardPanel({ isDark }: { isDark: boolean }) {
             </h3>
             <StackedAreaChart
               data={filtered.days}
-              keys={["agentCost"]}
+              keys={["usageCost"]}
               colors={isDark ? ["#38bdf8"] : ["#0284c7"]}
-              labels={["Agents"]}
+              labels={["LLM usage"]}
               format={(v) => `$${v.toFixed(2)}`}
               isDark={isDark}
             />

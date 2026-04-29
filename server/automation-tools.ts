@@ -84,6 +84,85 @@ Integrations available: ${integrationHint}`,
       ),
 
       tool(
+        "schedule_reminder",
+        `Schedule a ONE-TIME reminder/task that fires at a specific moment.
+
+Use for single-occurrence requests:
+  "remind me at 4pm Wednesday"
+  "ping me tomorrow morning"
+  "fire this in two hours"
+
+For RECURRING tasks ("every morning", "each Friday"), use create_automation.
+
+Construct \`runAt\` as ISO 8601 with the user's tz offset, using the Current
+context block in the system prompt. Example: "2026-04-29T16:00:00-04:00".
+Integrations available: ${integrationHint}`,
+        {
+          name: z.string().describe("Short label, e.g. 'wednesday deadline ping'."),
+          runAt: z
+            .string()
+            .describe(
+              "ISO 8601 datetime with tz offset, e.g. '2026-04-29T16:00:00-04:00'. Must be in the future.",
+            ),
+          task: z
+            .string()
+            .describe("Task for the sub-agent at fire time — what to do, look up, or remind."),
+          integrations: z
+            .array(z.string())
+            .optional()
+            .default([])
+            .describe("Integration names the sub-agent needs. Pass [] for reminder-only."),
+          notify: z
+            .boolean()
+            .optional()
+            .default(true)
+            .describe("If true, send the result to this conversation when it fires."),
+        },
+        async (args) => {
+          const ms = Date.parse(args.runAt);
+          if (Number.isNaN(ms)) {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: `Invalid runAt — couldn't parse "${args.runAt}". Use ISO 8601 with offset, e.g. "2026-04-29T16:00:00-04:00".`,
+                },
+              ],
+            };
+          }
+          if (ms <= Date.now()) {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: `runAt is in the past (${new Date(ms).toLocaleString()}). Use a future time.`,
+                },
+              ],
+            };
+          }
+          const automationId = randomId("rem");
+          await convex.mutation(api.automations.create, {
+            automationId,
+            name: args.name,
+            task: args.task,
+            integrations: args.integrations,
+            runAt: ms,
+            conversationId,
+            notifyConversationId: args.notify ? conversationId : undefined,
+            nextRunAt: ms,
+          });
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Created reminder ${automationId} "${args.name}" — fires at ${new Date(ms).toLocaleString()}.`,
+              },
+            ],
+          };
+        },
+      ),
+
+      tool(
         "list_automations",
         "List all automations for this conversation.",
         { enabledOnly: z.boolean().optional().default(false) },
@@ -95,10 +174,12 @@ Integrations available: ${integrationHint}`,
           if (mine.length === 0) {
             return { content: [{ type: "text" as const, text: "No automations." }] };
           }
-          const lines = mine.map(
-            (a) =>
-              `• [${a.automationId}] ${a.enabled ? "●" : "○"} "${a.name}" — ${a.schedule} — ${a.task}`,
-          );
+          const lines = mine.map((a) => {
+            const when = a.runAt
+              ? `once at ${new Date(a.runAt).toLocaleString()}`
+              : (a.schedule ?? "(unscheduled)");
+            return `• [${a.automationId}] ${a.enabled ? "●" : "○"} "${a.name}" — ${when} — ${a.task}`;
+          });
           return { content: [{ type: "text" as const, text: lines.join("\n") }] };
         },
       ),

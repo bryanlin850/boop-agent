@@ -13,7 +13,36 @@ import { broadcast } from "./broadcast.js";
 import { sendImessage } from "./sendblue.js";
 import { aggregateUsageFromResult, EMPTY_USAGE, type UsageTotals } from "./usage.js";
 
-const INTERACTION_SYSTEM = `You are Boop, a personal agent the user texts from iMessage.
+// TODO: source `timezone` per-user (memory entry or `conversations.timezone` field) instead of an env default.
+function buildInteractionSystem(opts: {
+  integrations: string[];
+  now: Date;
+  timezone: string;
+}): string {
+  const dayFmt = new Intl.DateTimeFormat("en-US", {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+    timeZone: opts.timezone,
+  });
+  const timeFmt = new Intl.DateTimeFormat("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: "short",
+    timeZone: opts.timezone,
+  });
+  const today = dayFmt.format(opts.now);
+  const localTime = timeFmt.format(opts.now);
+  const integrationsLine =
+    opts.integrations.join(", ") || "(no integrations configured yet)";
+
+  return `You are Boop, a personal agent the user texts from iMessage.
+
+Current context (use for resolving relative dates/times):
+- Today: ${today}
+- Local time: ${localTime} (${opts.timezone})
+- For "this Wednesday", "tomorrow", "in two hours" — compute from these values. Never ask the user for a date you can compute yourself.
 
 You are a DISPATCHER, not a doer. Your job:
 1. Understand what the user wants.
@@ -26,7 +55,7 @@ Tone: Warm, witty, concise. Write like you're texting a friend. No corporate voi
 Your only tools:
 - recall / write_memory (durable memory for this user)
 - spawn_agent (dispatches a sub-agent that CAN touch the world)
-- create_automation / list_automations / toggle_automation / delete_automation
+- create_automation / schedule_reminder / list_automations / toggle_automation / delete_automation
 - list_drafts / send_draft / reject_draft
 - get_config / set_model / list_integrations / search_composio_catalog / inspect_toolkit (self-inspection)
 
@@ -63,6 +92,7 @@ Safe to answer directly (no spawn needed):
 - Explaining what you just did, confirming a draft, relaying a sub-agent's result.
 - Clarifying your own abilities ("yes I can do that", "I'll need your X to proceed").
 - Anything that's purely about the user (using recall).
+- EXCEPT — if your IMMEDIATELY-PRIOR assistant turn proposed an action ("Want me to…?", "Should I…?", "I could…"), then a user affirmation ("sure", "sure thing", "yes", "ok", "go for it", "sounds good") is ACCEPTANCE, not chat closure. Carry out what you offered. If a parameter is missing (time, recipient, day), ask ONE targeted clarifying question — do not respond with a generic "let me know whenever".
 
 Everything else — SPAWN.
 
@@ -77,10 +107,11 @@ When relaying a sub-agent's answer:
 - You may tighten the body for iMessage (shorter bullets, fewer emojis),
   but the URLs are ground truth — don't touch them.
 
-Automations:
-- When the user asks for anything recurring ("every morning", "each week", "remind me", "check X daily"), use create_automation — don't just promise to do it later.
-- Pick a cron expression (5 fields) and a specific task for the sub-agent.
-- If they ask "what have I set up" or want to change/cancel something, use list_automations / toggle_automation / delete_automation.
+Scheduling:
+- RECURRING ("every morning", "each Friday", "daily X") → create_automation with a 5-field cron expression.
+- ONE-TIME ("Wednesday at 4pm", "tomorrow morning", "in two hours") → schedule_reminder with an ISO 8601 datetime that includes the user's tz offset (use the Current context block above to compute it).
+- A bare day-of-week without "every" defaults to ONE-TIME (the upcoming occurrence). Confirm only if genuinely ambiguous.
+- list_automations / toggle_automation / delete_automation work for both kinds.
 
 Drafts:
 - Any external action (email, calendar event, Slack message) goes through the draft flow. Execution agents SAVE drafts rather than sending directly.
@@ -106,9 +137,10 @@ Use these tools when the user asks about Boop's own configuration, connected
 accounts, or whether a service is reachable. They're cheap and synchronous —
 no ack required.
 
-Available integrations for spawn_agent: {{INTEGRATIONS}}
+Available integrations for spawn_agent: ${integrationsLine}
 
 Format: Plain iMessage-friendly text. Markdown sparingly. Keep replies under ~400 chars when you can.`;
+}
 
 interface HandleOpts {
   conversationId: string;
@@ -223,10 +255,11 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
     .map((m) => `${m.role.toUpperCase()}: ${m.content}`)
     .join("\n");
 
-  const systemPrompt = INTERACTION_SYSTEM.replace(
-    "{{INTEGRATIONS}}",
-    integrations.join(", ") || "(no integrations configured yet)",
-  );
+  const systemPrompt = buildInteractionSystem({
+    integrations,
+    now: new Date(),
+    timezone: process.env.BOOP_DEFAULT_TZ ?? "America/New_York",
+  });
 
   const prompt = historyBlock
     ? `Prior turns:\n${historyBlock}\n\nCurrent message:\n${opts.content}`
@@ -258,6 +291,7 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
           "mcp__boop-memory__recall",
           "mcp__boop-spawn__spawn_agent",
           "mcp__boop-automations__create_automation",
+          "mcp__boop-automations__schedule_reminder",
           "mcp__boop-automations__list_automations",
           "mcp__boop-automations__toggle_automation",
           "mcp__boop-automations__delete_automation",

@@ -2,8 +2,11 @@ import { useState } from "react";
 import { useQuery, useMutation } from "convex/react";
 import { api } from "../../../convex/_generated/api.js";
 
-function formatSchedule(schedule: string): string {
-  return schedule;
+function formatSchedule(auto: { schedule?: string; runAt?: number }): string {
+  if (auto.runAt !== undefined) {
+    return `once at ${new Date(auto.runAt).toLocaleString()}`;
+  }
+  return auto.schedule ?? "(unscheduled)";
 }
 
 function timeAgo(ts?: number): string {
@@ -129,7 +132,7 @@ export function AutomationsPanel({ isDark }: { isDark: boolean }) {
                 </span>
 
                 <span className={`text-xs ml-auto mono ${mutedText}`}>
-                  {formatSchedule(auto.schedule)}
+                  {formatSchedule(auto)}
                 </span>
               </div>
 
@@ -252,7 +255,7 @@ function AutomationDetail({
         </span>
 
         <span className={`text-xs ml-auto mono ${mutedText}`}>
-          {formatSchedule(auto.schedule)}
+          {formatSchedule(auto)}
         </span>
 
         <button

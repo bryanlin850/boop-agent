@@ -33,7 +33,8 @@ async function runAutomation(a: {
   name: string;
   task: string;
   integrations: string[];
-  schedule: string;
+  schedule?: string;
+  runAt?: number;
   conversationId?: string;
   notifyConversationId?: string;
 }): Promise<void> {
@@ -81,12 +82,25 @@ async function runAutomation(a: {
     broadcast("automation_failed", { automationId: a.automationId, runId, error: String(err) });
   }
 
-  const next = nextRunFor(a.schedule);
-  await convex.mutation(api.automations.markRan, {
-    automationId: a.automationId,
-    lastRunAt: Date.now(),
-    nextRunAt: next ?? undefined,
-  });
+  if (a.runAt !== undefined) {
+    // One-time reminder: disable so the tick loop ignores it; row stays for history.
+    await convex.mutation(api.automations.setEnabled, {
+      automationId: a.automationId,
+      enabled: false,
+    });
+    await convex.mutation(api.automations.markRan, {
+      automationId: a.automationId,
+      lastRunAt: Date.now(),
+      nextRunAt: undefined,
+    });
+  } else {
+    const next = a.schedule ? nextRunFor(a.schedule) : null;
+    await convex.mutation(api.automations.markRan, {
+      automationId: a.automationId,
+      lastRunAt: Date.now(),
+      nextRunAt: next ?? undefined,
+    });
+  }
 }
 
 export async function tickAutomations(): Promise<void> {
@@ -101,6 +115,7 @@ export async function tickAutomations(): Promise<void> {
       task: a.task,
       integrations: a.integrations,
       schedule: a.schedule,
+      runAt: a.runAt,
       conversationId: a.conversationId,
       notifyConversationId: a.notifyConversationId,
     }).catch((err) => console.error("[automations] run error", err));

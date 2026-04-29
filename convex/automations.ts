@@ -7,12 +7,21 @@ export const create = mutation({
     name: v.string(),
     task: v.string(),
     integrations: v.array(v.string()),
-    schedule: v.string(),
+    schedule: v.optional(v.string()),
+    runAt: v.optional(v.number()),
     conversationId: v.optional(v.string()),
     notifyConversationId: v.optional(v.string()),
     nextRunAt: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    const hasSchedule = typeof args.schedule === "string" && args.schedule.length > 0;
+    const hasRunAt = typeof args.runAt === "number";
+    if (!hasSchedule && !hasRunAt) {
+      throw new Error("automations.create requires either `schedule` (cron) or `runAt` (epoch ms).");
+    }
+    if (hasSchedule && hasRunAt) {
+      throw new Error("automations.create requires exactly one of `schedule` or `runAt`, not both.");
+    }
     const existing = await ctx.db
       .query("automations")
       .withIndex("by_automation_id", (q) => q.eq("automationId", args.automationId))

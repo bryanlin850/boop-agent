@@ -6,6 +6,7 @@ import { buildMcpServersForIntegrations, listIntegrations } from "./integrations
 import { createDraftStagingMcp } from "./draft-tools.js";
 import { aggregateUsageFromResult, EMPTY_USAGE, type UsageTotals } from "./usage.js";
 import { getRuntimeModel } from "./runtime-config.js";
+import { createRedditSearchMcp, redditSearchAvailable } from "./openai-reddit-search.js";
 
 const running = new Map<string, AbortController>();
 
@@ -46,10 +47,11 @@ const EXECUTION_SYSTEM = `You are a focused background worker for the user.
 
 Your job:
 1. Perform the task you were given, end to end.
-2. Use your tools — WebSearch, WebFetch, and any integrations loaded for this spawn — to investigate and act.
+2. Use your tools — search_reddit for Reddit-specific research, WebSearch, WebFetch, and any integrations loaded for this spawn — to investigate and act.
 3. Return a concise, well-structured answer — not a data dump.
 
 Research discipline:
+- For Reddit-specific research, use search_reddit first when available. It uses OpenAI web search restricted to reddit.com and reports whether direct Reddit enrichment was blocked.
 - Prefer WebSearch for fresh/factual questions. WebFetch when you need the content of a known URL.
 - Cite real URLs only — NEVER invent sources. If a page failed to load, say so.
 - Cross-check when it matters: one search is rarely enough for a claim.
@@ -65,6 +67,9 @@ No URLs = no sources section. Never write vague names like "Lonely Planet" or
 "official guide" without the specific URL. The interaction agent relays your
 output to the user verbatim, so if you don't include URLs, the user won't see
 any.
+
+If you use search_reddit, include the Reddit thread URLs it returned and note
+briefly if engagement/comment enrichment was blocked or failed.
 
 Style:
 - Optimize for iMessage delivery: short sentences, bullets over paragraphs, no tables.
@@ -109,7 +114,7 @@ export async function spawnExecutionAgent(opts: SpawnOptions): Promise<SpawnResu
     conversationId: opts.conversationId,
     name,
     task: opts.task,
-    mcpServers: opts.integrations,
+    mcpServers: [...opts.integrations, ...(redditSearchAvailable() ? ["boop-reddit-search"] : [])],
   });
   broadcast("agent_spawned", { agentId, name, task: opts.task });
 
@@ -122,8 +127,10 @@ export async function spawnExecutionAgent(opts: SpawnOptions): Promise<SpawnResu
   const draftServer = opts.conversationId
     ? createDraftStagingMcp(opts.conversationId)
     : undefined;
+  const redditServer = redditSearchAvailable() ? createRedditSearchMcp() : undefined;
   const mcpServers = {
     ...integrationServers,
+    ...(redditServer ? { "boop-reddit-search": redditServer } : {}),
     ...(draftServer ? { "boop-drafts": draftServer } : {}),
   };
   const allowedTools = [

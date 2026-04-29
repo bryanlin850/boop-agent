@@ -7,6 +7,7 @@ import {
   listToolsForToolkit,
 } from "./composio.js";
 import { availableIntegrations } from "./execution-agent.js";
+import { redditSearchAvailable } from "./openai-reddit-search.js";
 import {
   KNOWN_MODELS,
   MODEL_ALIASES,
@@ -33,6 +34,7 @@ export function createSelfMcp() {
             integrationsLoaded: integrations,
             integrationCount: integrations.length,
             composioEnabled: Boolean(process.env.COMPOSIO_API_KEY),
+            redditSearchEnabled: redditSearchAvailable(),
             embeddingsEnabled: Boolean(process.env.VOYAGE_API_KEY),
             sendblueEnabled: Boolean(process.env.SENDBLUE_API_KEY),
           };

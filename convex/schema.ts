@@ -70,6 +70,7 @@ export default defineSchema({
       v.literal("completed"),
       v.literal("failed"),
       v.literal("cancelled"),
+      v.literal("paused"),
     ),
     result: v.optional(v.string()),
     error: v.optional(v.string()),
@@ -97,6 +98,7 @@ export default defineSchema({
       v.literal("consolidation-proposer"),
       v.literal("consolidation-adversary"),
       v.literal("consolidation-judge"),
+      v.literal("proactive"),
     ),
     conversationId: v.optional(v.string()),
     turnId: v.optional(v.string()),
@@ -151,6 +153,10 @@ export default defineSchema({
     integrations: v.array(v.string()),
     schedule: v.optional(v.string()),
     runAt: v.optional(v.number()),
+    // IANA timezone recurring cron automations are evaluated in. Stored at
+    // create time so changing the user's global timezone later doesn't shift
+    // existing automations. Optional for one-time reminders and pre-TZ rows.
+    timezone: v.optional(v.string()),
     enabled: v.boolean(),
     conversationId: v.optional(v.string()),
     notifyConversationId: v.optional(v.string()),

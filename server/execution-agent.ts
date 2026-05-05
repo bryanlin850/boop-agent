@@ -7,6 +7,7 @@ import { createDraftStagingMcp } from "./draft-tools.js";
 import { aggregateUsageFromResult, EMPTY_USAGE, type UsageTotals } from "./usage.js";
 import { getRuntimeModel } from "./runtime-config.js";
 import { createRedditSearchMcp, redditSearchAvailable } from "./openai-reddit-search.js";
+import { createPatchrightBrowserMcp, patchrightBrowserAvailable } from "./patchright-browser.js";
 
 const running = new Map<string, AbortController>();
 
@@ -47,12 +48,13 @@ const EXECUTION_SYSTEM = `You are a focused background worker for the user.
 
 Your job:
 1. Perform the task you were given, end to end.
-2. Use your tools — search_reddit for Reddit-specific research, WebSearch, WebFetch, and any integrations loaded for this spawn — to investigate and act.
+2. Use your tools — search_reddit for Reddit-specific research, WebSearch, WebFetch, browser tools (when present) for real Chrome automation, and any integrations loaded for this spawn — to investigate and act.
 3. Return a concise, well-structured answer — not a data dump.
 
 Research discipline:
 - For Reddit-specific research, use search_reddit first when available. It uses OpenAI web search restricted to reddit.com and reports whether direct Reddit enrichment was blocked.
 - Prefer WebSearch for fresh/factual questions. WebFetch when you need the content of a known URL.
+- Reach for browser tools when WebFetch returns a stub/blocked page, when the page needs JavaScript, login, clicks, scrolling, or form input. Tools: browser_navigate, browser_click, browser_type, browser_get_state, browser_extract_content, browser_scroll, browser_go_back, browser_list_tabs, browser_switch_tab. Always close sessions with browser_close_all when done.
 - Cite real URLs only — NEVER invent sources. If a page failed to load, say so.
 - Cross-check when it matters: one search is rarely enough for a claim.
 
@@ -114,7 +116,11 @@ export async function spawnExecutionAgent(opts: SpawnOptions): Promise<SpawnResu
     conversationId: opts.conversationId,
     name,
     task: opts.task,
-    mcpServers: [...opts.integrations, ...(redditSearchAvailable() ? ["boop-reddit-search"] : [])],
+    mcpServers: [
+      ...opts.integrations,
+      ...(redditSearchAvailable() ? ["boop-reddit-search"] : []),
+      ...(patchrightBrowserAvailable() ? ["patchright-browser"] : []),
+    ],
   });
   broadcast("agent_spawned", { agentId, name, task: opts.task });
 
@@ -128,10 +134,12 @@ export async function spawnExecutionAgent(opts: SpawnOptions): Promise<SpawnResu
     ? createDraftStagingMcp(opts.conversationId)
     : undefined;
   const redditServer = redditSearchAvailable() ? createRedditSearchMcp() : undefined;
+  const patchrightBrowserServer = patchrightBrowserAvailable() ? createPatchrightBrowserMcp() : undefined;
   const mcpServers = {
     ...integrationServers,
     ...(redditServer ? { "boop-reddit-search": redditServer } : {}),
     ...(draftServer ? { "boop-drafts": draftServer } : {}),
+    ...(patchrightBrowserServer ? { "patchright-browser": patchrightBrowserServer } : {}),
   };
   const allowedTools = [
     "WebSearch",

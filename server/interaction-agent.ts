@@ -55,7 +55,7 @@ Tone: Warm, witty, concise. Write like you're texting a friend. No corporate voi
 
 Your only tools:
 - recall / write_memory (durable memory for this user)
-- save_file / lookup_file / list_files / delete_file (saved-files store, separate from memory)
+- save_file / lookup_file / list_files / delete_file / attach_file (saved-files store, separate from memory; attach_file makes the next iMessage carry a real binary attachment)
 - spawn_agent (dispatches a sub-agent that CAN touch the world)
 - create_automation / schedule_reminder / list_automations / toggle_automation / delete_automation
 - list_drafts / send_draft / reject_draft
@@ -202,9 +202,13 @@ to keep, not a fact about themselves.
 - delete_file: "delete the office address" — pass the fileId from a prior
   list/lookup.
 
-When lookup_file returns a binary (image/pdf) with a "url" field, paste that
-URL into your reply on its own line — iMessage auto-previews it so the user
-sees the file inline. For text files, just relay the content.
+When you have a binary file (image/pdf) to deliver — from lookup_file, from
+save_file you just made, or from a sub-agent that returned a fileId (e.g.
+browser_screenshot) — call attach_file({ fileId }) so the iMessage carries
+the actual file as a real attachment instead of a link bubble. Then write
+your reply text NORMALLY (no need to paste the URL — the user will see the
+attachment). One attach_file per turn; last call wins. Skip it for text or
+url-pointer files.
 
 Cross-source retrieval — IMPORTANT:
 The files store is a CACHE, not a complete inventory of the user's data. If
@@ -281,9 +285,18 @@ function randomId(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-export async function handleUserMessage(opts: HandleOpts): Promise<string> {
+export interface HandleResult {
+  text: string;
+  // Set when the dispatcher called attach_file. Carries a Convex storage URL
+  // that the outbound transport (SendBlue) should attach as media instead of
+  // just including in the reply text.
+  mediaUrl?: string;
+}
+
+export async function handleUserMessage(opts: HandleOpts): Promise<HandleResult> {
   const turnId = randomId("turn");
   const integrations = availableIntegrations();
+  let pendingMediaUrl: string | undefined;
 
   const inboundRole = opts.kind === "proactive" ? "system" : "user";
   await convex.mutation(api.messages.send, {
@@ -300,7 +313,12 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
   const memoryServer = createMemoryMcp(opts.conversationId);
   const automationServer = createAutomationMcp(opts.conversationId);
   const draftDecisionServer = createDraftDecisionMcp(opts.conversationId);
-  const filesServer = createFilesMcp(opts.conversationId);
+  const filesServer = createFilesMcp({
+    conversationId: opts.conversationId,
+    onAttach: (url) => {
+      pendingMediaUrl = url;
+    },
+  });
   const selfServer = createSelfMcp();
 
   const ackServer = createSdkMcpServer({
@@ -453,6 +471,7 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
           "mcp__boop-files__lookup_file",
           "mcp__boop-files__list_files",
           "mcp__boop-files__delete_file",
+          "mcp__boop-files__attach_file",
           "mcp__boop-ack__send_ack",
           "mcp__boop-self__get_config",
           "mcp__boop-self__set_model",
@@ -561,5 +580,5 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
     }).catch((err) => console.error("[interaction] extraction error", err));
   }
 
-  return reply;
+  return { text: reply, mediaUrl: pendingMediaUrl };
 }

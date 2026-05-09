@@ -91,7 +91,10 @@ export async function sendImessage(
     return;
   }
   const plain = stripMarkdown(text);
-  const parts = chunk(plain);
+  // SendBlue requires a non-empty content. If we only have media to send,
+  // give it a single space so the API accepts the request — iMessage just
+  // shows the attachment with no caption.
+  const parts = plain.trim().length === 0 && opts?.mediaUrl ? [" "] : chunk(plain);
   for (let i = 0; i < parts.length; i++) {
     const part = parts[i];
     const body: Record<string, unknown> = {
@@ -202,7 +205,7 @@ export function createSendblueRouter(): express.Router {
 
     const stopTyping = startTypingLoop(from_number);
     try {
-      const reply = await handleUserMessage({
+      const result = await handleUserMessage({
         conversationId,
         content: effectiveContent,
         turnTag,
@@ -211,17 +214,20 @@ export function createSendblueRouter(): express.Router {
           : undefined,
         onThinking: (t) => broadcast("thinking", { conversationId, t }),
       });
-      if (reply) {
+      const replyText = result.text;
+      if (replyText || result.mediaUrl) {
         const elapsed = ((Date.now() - start) / 1000).toFixed(1);
-        const replyPreview = reply.length > 100 ? reply.slice(0, 100) + "…" : reply;
+        const replyPreview =
+          replyText.length > 100 ? replyText.slice(0, 100) + "…" : replyText;
+        const mediaTag = result.mediaUrl ? " [+media]" : "";
         console.log(
-          `[turn ${turnTag}] → reply (${elapsed}s, ${reply.length} chars): ${JSON.stringify(replyPreview)}`,
+          `[turn ${turnTag}] → reply (${elapsed}s, ${replyText.length} chars)${mediaTag}: ${JSON.stringify(replyPreview)}`,
         );
-        await sendImessage(from_number, reply);
+        await sendImessage(from_number, replyText, { mediaUrl: result.mediaUrl });
         await convex.mutation(api.messages.send, {
           conversationId,
           role: "assistant",
-          content: reply,
+          content: replyText,
         });
       } else {
         console.log(`[turn ${turnTag}] → (no reply)`);

@@ -31,6 +31,16 @@ async function attachEmbedding(
   }
 }
 
+interface FilesMcpOpts {
+  conversationId?: string;
+  // When provided, exposes an `attach_file` tool that the dispatcher can
+  // call to make the next outbound iMessage carry a real media attachment
+  // (via SendBlue's `media_url` parameter) instead of just an inline URL
+  // preview. Execution-agents don't need this — their results flow back
+  // through the dispatcher which decides whether to attach.
+  onAttach?: (url: string) => void;
+}
+
 /**
  * Files MCP — exposed to BOTH the dispatcher (for inbound iMessage saves and
  * fast lookups) and execution-agents (so a Gmail/Drive sub-agent can cache
@@ -41,11 +51,17 @@ async function attachEmbedding(
  *   - `sourceUrl`: a URL to fetch and store as a blob (kind="image"|"pdf")
  *   - `externalUrl`: a pointer to keep without downloading (kind="url")
  */
-export function createFilesMcp(conversationId?: string) {
-  return createSdkMcpServer({
-    name: "boop-files",
-    version: "0.1.0",
-    tools: [
+export function createFilesMcp(
+  conversationIdOrOpts?: string | FilesMcpOpts,
+) {
+  const opts: FilesMcpOpts =
+    typeof conversationIdOrOpts === "string"
+      ? { conversationId: conversationIdOrOpts }
+      : (conversationIdOrOpts ?? {});
+  const conversationId = opts.conversationId;
+  const onAttach = opts.onAttach;
+
+  const baseTools = [
       tool(
         "save_file",
         `Save a file (text, image, PDF, or URL pointer) for the user to look up later.
@@ -278,6 +294,45 @@ Returns up to N files with id, name, kind, and (for binaries) a fetchable storag
           };
         },
       ),
-    ],
+  ];
+
+  const attachTool = onAttach
+    ? [
+        tool(
+          "attach_file",
+          `Attach a saved binary file (image/pdf) to the next iMessage you send the user. Call this AFTER lookup_file or after a sub-agent returns a fileId. The file becomes a true iMessage attachment via SendBlue's media_url, not just a link bubble. Only one attachment per turn — last call wins. Skip for text/url files.`,
+          { fileId: z.string() },
+          async (args) => {
+            const url = await convex.query(api.files.getStorageUrl, {
+              fileId: args.fileId,
+            });
+            if (!url) {
+              return {
+                content: [
+                  {
+                    type: "text" as const,
+                    text: `File ${args.fileId} has no storage blob (text or url-pointer file). Include the URL in your reply text instead.`,
+                  },
+                ],
+              };
+            }
+            onAttach(url);
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: `OK — will attach ${args.fileId} to the next iMessage send.`,
+                },
+              ],
+            };
+          },
+        ),
+      ]
+    : [];
+
+  return createSdkMcpServer({
+    name: "boop-files",
+    version: "0.1.0",
+    tools: [...baseTools, ...attachTool],
   });
 }

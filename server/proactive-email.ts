@@ -301,15 +301,16 @@ async function dispatchProactiveNotice(summary: string): Promise<void> {
     return;
   }
   const conversationId = `sms:${phone}`;
-  const reply = await handleUserMessage({
+  const result = await handleUserMessage({
     conversationId,
     content: `[proactive notice] ${summary}`,
     kind: "proactive",
   });
+  const reply = result.text;
   // handleUserMessage only sends iMessage from inside send_ack; the final
   // reply is the caller's responsibility.
-  if (reply && reply !== "(no reply)") {
-    await sendImessage(phone, reply);
+  if ((reply && reply !== "(no reply)") || result.mediaUrl) {
+    await sendImessage(phone, reply, { mediaUrl: result.mediaUrl });
     await convex.mutation(api.messages.send, {
       conversationId,
       role: "assistant",

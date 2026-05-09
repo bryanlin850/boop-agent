@@ -12,6 +12,21 @@ export const get = query({
   },
 });
 
+export const getMany = query({
+  args: { keys: v.array(v.string()) },
+  handler: async (ctx, args) => {
+    const result: Record<string, string | null> = {};
+    for (const key of args.keys) {
+      const row = await ctx.db
+        .query("settings")
+        .withIndex("by_key", (q) => q.eq("key", key))
+        .unique();
+      result[key] = row?.value ?? null;
+    }
+    return result;
+  },
+});
+
 export const set = mutation({
   args: { key: v.string(), value: v.string() },
   handler: async (ctx, args) => {

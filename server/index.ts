@@ -16,6 +16,7 @@ import { createComposioRouter } from "./composio-routes.js";
 import { ensureProactiveWatcher } from "./proactive-email.js";
 import { preloadLocalModel } from "./embeddings.js";
 import { createMemoryRouter } from "./memory-routes.js";
+import { listActiveSessions, resetAllProfiles } from "./patchright-browser.js";
 
 async function main() {
   await loadIntegrations();
@@ -70,6 +71,20 @@ async function main() {
       );
       res.json({ ok: true, triggered: "manual" });
     } catch (err) {
+      res.status(500).json({ error: String(err) });
+    }
+  });
+
+  app.get("/admin/patchright/sessions", (_req, res) => {
+    res.json({ sessions: listActiveSessions() });
+  });
+
+  app.post("/admin/patchright/reset-profiles", async (_req, res) => {
+    try {
+      const result = await resetAllProfiles();
+      res.json(result);
+    } catch (err) {
+      console.error("[patchright] reset failed", err);
       res.status(500).json({ error: String(err) });
     }
   });

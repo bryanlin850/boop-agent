@@ -44,18 +44,24 @@ function extractAccounts(input: unknown): string[] {
   return [...accounts];
 }
 
-const EXECUTION_SYSTEM = `You are a focused background worker for the user.
+function buildExecutionSystem(patchrightEnabled: boolean): string {
+  const toolsLine = patchrightEnabled
+    ? "2. Use your tools — search_reddit for Reddit-specific research, WebSearch, WebFetch, browser tools (when present) for real Chrome automation, and any integrations loaded for this spawn — to investigate and act."
+    : "2. Use your tools — search_reddit for Reddit-specific research, WebSearch, WebFetch, and any integrations loaded for this spawn — to investigate and act.";
+  const browserDiscipline = patchrightEnabled
+    ? "- Reach for browser tools when WebFetch returns a stub/blocked page, when the page needs JavaScript, login, clicks, scrolling, or form input. Tools: browser_navigate, browser_click, browser_type, browser_get_state, browser_extract_content, browser_scroll, browser_go_back, browser_list_tabs, browser_switch_tab. Always close sessions with browser_close_all when done.\n"
+    : "";
+  return `You are a focused background worker for the user.
 
 Your job:
 1. Perform the task you were given, end to end.
-2. Use your tools — search_reddit for Reddit-specific research, WebSearch, WebFetch, browser tools (when present) for real Chrome automation, and any integrations loaded for this spawn — to investigate and act.
+${toolsLine}
 3. Return a concise, well-structured answer — not a data dump.
 
 Research discipline:
 - For Reddit-specific research, use search_reddit first when available. It uses OpenAI web search restricted to reddit.com and reports whether direct Reddit enrichment was blocked.
 - Prefer WebSearch for fresh/factual questions. WebFetch when you need the content of a known URL.
-- Reach for browser tools when WebFetch returns a stub/blocked page, when the page needs JavaScript, login, clicks, scrolling, or form input. Tools: browser_navigate, browser_click, browser_type, browser_get_state, browser_extract_content, browser_scroll, browser_go_back, browser_list_tabs, browser_switch_tab. Always close sessions with browser_close_all when done.
-- Cite real URLs only — NEVER invent sources. If a page failed to load, say so.
+${browserDiscipline}- Cite real URLs only — NEVER invent sources. If a page failed to load, say so.
 - Cross-check when it matters: one search is rarely enough for a claim.
 
 MANDATORY: for any task that used WebSearch or WebFetch, end your response with
@@ -82,6 +88,7 @@ Style:
 Safety:
 - Anything that sends a message, creates an event, or takes an external action: call save_draft with a JSON payload instead of the real send/create tool. Return the summary so the interaction agent can show it to the user.
 - Only the interaction agent's send_draft tool commits. You never commit.`;
+}
 
 export interface SpawnOptions {
   task: string;
@@ -111,6 +118,8 @@ export async function spawnExecutionAgent(opts: SpawnOptions): Promise<SpawnResu
   );
   const agentStart = Date.now();
 
+  const patchrightEnabled = await patchrightBrowserAvailable();
+
   await convex.mutation(api.agents.create, {
     agentId,
     conversationId: opts.conversationId,
@@ -119,7 +128,7 @@ export async function spawnExecutionAgent(opts: SpawnOptions): Promise<SpawnResu
     mcpServers: [
       ...opts.integrations,
       ...(redditSearchAvailable() ? ["boop-reddit-search"] : []),
-      ...(patchrightBrowserAvailable() ? ["patchright-browser"] : []),
+      ...(patchrightEnabled ? ["patchright-browser"] : []),
     ],
   });
   broadcast("agent_spawned", { agentId, name, task: opts.task });
@@ -134,7 +143,7 @@ export async function spawnExecutionAgent(opts: SpawnOptions): Promise<SpawnResu
     ? createDraftStagingMcp(opts.conversationId)
     : undefined;
   const redditServer = redditSearchAvailable() ? createRedditSearchMcp() : undefined;
-  const patchrightBrowserServer = patchrightBrowserAvailable() ? createPatchrightBrowserMcp() : undefined;
+  const patchrightBrowserServer = patchrightEnabled ? createPatchrightBrowserMcp({ agentId }) : undefined;
   const mcpServers = {
     ...integrationServers,
     ...(redditServer ? { "boop-reddit-search": redditServer } : {}),
@@ -158,7 +167,7 @@ export async function spawnExecutionAgent(opts: SpawnOptions): Promise<SpawnResu
     for await (const msg of query({
       prompt: opts.task,
       options: {
-        systemPrompt: EXECUTION_SYSTEM,
+        systemPrompt: buildExecutionSystem(patchrightEnabled),
         model: requestedModel,
         mcpServers,
         allowedTools,

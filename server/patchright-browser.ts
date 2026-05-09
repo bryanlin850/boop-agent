@@ -1,48 +1,37 @@
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { chromium, type BrowserContext, type Page } from "patchright";
 import path from "node:path";
+import os from "node:os";
+import fs from "node:fs/promises";
 import { z } from "zod";
+import {
+  evaluateHost,
+  isPatchrightEnabled as isEnabled,
+  loadPatchrightConfig,
+  PERSISTENT_PROFILE_BASE_DIR,
+  wipePersistentProfileDirs,
+  type PatchrightConfig,
+} from "./patchright-config.js";
 
-const ENABLED_ENV = "PATCHRIGHT_BROWSER_ENABLED";
-const CHANNEL_ENV = "PATCHRIGHT_CHANNEL";
-const PROFILE_DIR_ENV = "PATCHRIGHT_PROFILE_DIR";
-const DEFAULT_CHANNEL = "chrome";
-const DEFAULT_BASE_PROFILE_DIR = "data/patchright-browser";
-const MAX_TEXT_CHARS = 20_000;
-
-interface BrowserSession {
+interface SessionRecord {
+  sessionId: string;
+  agentId?: string;
   context: BrowserContext;
   activePage: Page;
+  profileDir: string;
+  ephemeral: boolean;
+  createdAt: number;
+  lastActivityAt: number;
+  idleTimer?: NodeJS.Timeout;
+  hardTimer?: NodeJS.Timeout;
+  refSelectors: Map<string, string>;
+  config: PatchrightConfig;
 }
 
-interface SnapshotElement {
-  ref: string;
-  tag: string;
-  role?: string | null;
-  name?: string | null;
-  text?: string | null;
-  href?: string | null;
-  placeholder?: string | null;
-  value?: string | null;
-  type?: string | null;
-  disabled: boolean;
-  selector: string;
-  rect: {
-    x: number;
-    y: number;
-    width: number;
-    height: number;
-  };
-}
+const activeSessions = new Map<string, SessionRecord>();
 
-function isEnabled(): boolean {
-  const v = process.env[ENABLED_ENV];
-  if (!v) return false;
-  const norm = v.trim().toLowerCase();
-  return norm === "1" || norm === "true" || norm === "yes" || norm === "on";
-}
-
-export function patchrightBrowserAvailable(): boolean {
+// Re-exported as async (replaces the sync env check).
+export async function patchrightBrowserAvailable(): Promise<boolean> {
   return isEnabled();
 }
 
@@ -50,10 +39,9 @@ function randomId(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function profileDirForSession(sessionId: string): string {
-  const explicit = process.env[PROFILE_DIR_ENV]?.trim();
-  if (explicit) return path.resolve(explicit);
-  return path.resolve(process.cwd(), DEFAULT_BASE_PROFILE_DIR, sessionId);
+function profileDirFor(sessionId: string, persistent: boolean): { dir: string; ephemeral: boolean } {
+  if (persistent) return { dir: path.join(PERSISTENT_PROFILE_BASE_DIR, sessionId), ephemeral: false };
+  return { dir: path.join(os.tmpdir(), `patchright-${sessionId}`), ephemeral: true };
 }
 
 function normalizeUrl(url: string): string {
@@ -70,200 +58,385 @@ function jsonText(value: unknown) {
   return okText(JSON.stringify(value, null, 2));
 }
 
-function clampText(text: string, maxChars = MAX_TEXT_CHARS): string {
+function clampText(text: string, maxChars: number): string {
   return text.length > maxChars ? `${text.slice(0, maxChars)}\n\n[truncated ${text.length - maxChars} chars]` : text;
 }
 
-export function createPatchrightBrowserMcp() {
-  const sessionId = randomId("browser");
-  const refSelectors = new Map<string, string>();
-  let session: BrowserSession | undefined;
+function clearTimers(record: SessionRecord) {
+  if (record.idleTimer) {
+    clearTimeout(record.idleTimer);
+    record.idleTimer = undefined;
+  }
+  if (record.hardTimer) {
+    clearTimeout(record.hardTimer);
+    record.hardTimer = undefined;
+  }
+}
 
-  async function ensureSession(): Promise<BrowserSession> {
-    if (session && !session.activePage.isClosed()) return session;
+function armIdleTimer(record: SessionRecord) {
+  if (record.idleTimer) clearTimeout(record.idleTimer);
+  if (record.config.idleTimeoutMs <= 0) return;
+  record.idleTimer = setTimeout(() => {
+    console.log(
+      `[patchright] reaper closing idle session=${record.sessionId} agent=${record.agentId ?? "?"} idle=${record.config.idleTimeoutMs}ms`,
+    );
+    closeSession(record.sessionId).catch((err) =>
+      console.warn(`[patchright] idle reaper close failed for ${record.sessionId}`, err),
+    );
+  }, record.config.idleTimeoutMs);
+  record.idleTimer.unref();
+}
 
-    const context = await chromium.launchPersistentContext(profileDirForSession(sessionId), {
-      channel: process.env[CHANNEL_ENV]?.trim() || DEFAULT_CHANNEL,
-      headless: false,
-      viewport: null,
+function armHardTimer(record: SessionRecord) {
+  if (record.hardTimer) clearTimeout(record.hardTimer);
+  if (record.config.maxSessionMs <= 0) return;
+  record.hardTimer = setTimeout(() => {
+    console.log(
+      `[patchright] reaper closing aged session=${record.sessionId} agent=${record.agentId ?? "?"} maxAge=${record.config.maxSessionMs}ms`,
+    );
+    closeSession(record.sessionId).catch((err) =>
+      console.warn(`[patchright] hard reaper close failed for ${record.sessionId}`, err),
+    );
+  }, record.config.maxSessionMs);
+  record.hardTimer.unref();
+}
+
+function touchActivity(record: SessionRecord) {
+  record.lastActivityAt = Date.now();
+  armIdleTimer(record);
+}
+
+async function closeSession(sessionId: string): Promise<boolean> {
+  const record = activeSessions.get(sessionId);
+  if (!record) return false;
+  activeSessions.delete(sessionId);
+  clearTimers(record);
+  try {
+    await record.context.close();
+  } catch (err) {
+    console.warn(`[patchright] context.close failed for ${sessionId}`, err);
+  }
+  if (record.ephemeral) {
+    await fs.rm(record.profileDir, { recursive: true, force: true }).catch((err) =>
+      console.warn(`[patchright] ephemeral cleanup failed for ${record.profileDir}`, err),
+    );
+  }
+  return true;
+}
+
+export async function closeAllActiveSessions(): Promise<string[]> {
+  const ids = [...activeSessions.keys()];
+  await Promise.all(ids.map((id) => closeSession(id)));
+  return ids;
+}
+
+export function listActiveSessions(): Array<{
+  sessionId: string;
+  agentId?: string;
+  url: string;
+  profileDir: string;
+  ephemeral: boolean;
+  createdAt: number;
+  lastActivityAt: number;
+  ageMs: number;
+  idleMs: number;
+}> {
+  const now = Date.now();
+  return [...activeSessions.values()].map((r) => ({
+    sessionId: r.sessionId,
+    agentId: r.agentId,
+    url: r.activePage.isClosed() ? "" : r.activePage.url(),
+    profileDir: r.profileDir,
+    ephemeral: r.ephemeral,
+    createdAt: r.createdAt,
+    lastActivityAt: r.lastActivityAt,
+    ageMs: now - r.createdAt,
+    idleMs: now - r.lastActivityAt,
+  }));
+}
+
+export async function resetAllProfiles(): Promise<{ closedSessions: string[]; dirsRemoved: string[] }> {
+  const closedSessions = await closeAllActiveSessions();
+  const dirsRemoved = await wipePersistentProfileDirs();
+  console.log(
+    `[patchright] reset complete — closed ${closedSessions.length} session(s), removed ${dirsRemoved.length} profile dir(s)`,
+  );
+  return { closedSessions, dirsRemoved };
+}
+
+async function launchSession(sessionId: string, agentId: string | undefined, config: PatchrightConfig): Promise<SessionRecord> {
+  const { dir: profileDir, ephemeral } = profileDirFor(sessionId, config.persistentProfile);
+  console.log(
+    `[patchright] launching session=${sessionId} agent=${agentId ?? "?"} headless=${config.headless} channel=${config.channel} persistent=${config.persistentProfile} actionTimeoutMs=${config.actionTimeoutMs} maxElements=${config.maxElements} blockResources=${config.blockResources.join(",") || "none"} allowlist=${config.domainAllowlist.length} blocklist=${config.domainBlocklist.length} idleMs=${config.idleTimeoutMs} hardMs=${config.maxSessionMs}`,
+  );
+  const context = await chromium.launchPersistentContext(profileDir, {
+    channel: config.channel,
+    headless: config.headless,
+    viewport: null,
+  });
+
+  if (config.blockResources.length > 0) {
+    const blocked = new Set<string>(config.blockResources);
+    await context.route("**/*", (route) => {
+      const type = route.request().resourceType();
+      if (blocked.has(type)) {
+        route.abort().catch(() => {});
+      } else {
+        route.continue().catch(() => {});
+      }
     });
-    const activePage = context.pages()[0] ?? (await context.newPage());
-    activePage.setDefaultTimeout(15_000);
-    session = { context, activePage };
-    return session;
   }
 
-  async function getActivePage(): Promise<Page> {
-    const current = await ensureSession();
-    if (current.activePage.isClosed()) {
-      current.activePage = current.context.pages().find((page) => !page.isClosed()) ?? (await current.context.newPage());
-      current.activePage.setDefaultTimeout(15_000);
-    }
-    return current.activePage;
+  const activePage = context.pages()[0] ?? (await context.newPage());
+  activePage.setDefaultTimeout(config.actionTimeoutMs);
+
+  const record: SessionRecord = {
+    sessionId,
+    agentId,
+    context,
+    activePage,
+    profileDir,
+    ephemeral,
+    createdAt: Date.now(),
+    lastActivityAt: Date.now(),
+    refSelectors: new Map(),
+    config,
+  };
+  activeSessions.set(sessionId, record);
+  armIdleTimer(record);
+  armHardTimer(record);
+  return record;
+}
+
+async function ensureSession(sessionId: string, agentId: string | undefined): Promise<SessionRecord> {
+  const existing = activeSessions.get(sessionId);
+  if (existing && !existing.activePage.isClosed()) {
+    return existing;
   }
+  if (existing) {
+    // Stale entry (page closed underneath us) — clean up before relaunching.
+    await closeSession(sessionId);
+  }
+  const config = await loadPatchrightConfig();
+  return launchSession(sessionId, agentId, config);
+}
 
-  async function snapshotPage(page: Page, maxElements: number): Promise<{
-    url: string;
-    title: string;
-    elements: SnapshotElement[];
-  }> {
-    const title = await page.title().catch(() => "");
-    const elements = await page.evaluate((limit) => {
-      const selectors = [
-        "a[href]",
-        "button",
-        "input",
-        "textarea",
-        "select",
-        "summary",
-        "[role='button']",
-        "[role='link']",
-        "[role='menuitem']",
-        "[contenteditable='true']",
-        "[onclick]",
-      ].join(",");
+async function getActivePage(record: SessionRecord): Promise<Page> {
+  if (record.activePage.isClosed()) {
+    record.activePage =
+      record.context.pages().find((page) => !page.isClosed()) ?? (await record.context.newPage());
+    record.activePage.setDefaultTimeout(record.config.actionTimeoutMs);
+  }
+  return record.activePage;
+}
 
-      const cssEscape = (value: string) => {
-        const css = globalThis.CSS as typeof CSS | undefined;
-        return css?.escape ? css.escape(value) : value.replace(/[^a-zA-Z0-9_-]/g, "\\$&");
-      };
+async function snapshotPage(
+  record: SessionRecord,
+  page: Page,
+  maxElements: number,
+): Promise<{
+  url: string;
+  title: string;
+  elements: Array<Record<string, unknown>>;
+}> {
+  const title = await page.title().catch(() => "");
+  const elements = await page.evaluate((limit) => {
+    const selectors = [
+      "a[href]",
+      "button",
+      "input",
+      "textarea",
+      "select",
+      "summary",
+      "[role='button']",
+      "[role='link']",
+      "[role='menuitem']",
+      "[contenteditable='true']",
+      "[onclick]",
+    ].join(",");
 
-      const visible = (el: Element) => {
-        const rect = el.getBoundingClientRect();
-        if (rect.width <= 0 || rect.height <= 0) return false;
-        const style = window.getComputedStyle(el);
-        return style.visibility !== "hidden" && style.display !== "none" && Number(style.opacity || "1") > 0;
-      };
-
-      const selectorFor = (el: Element) => {
-        const parts: string[] = [];
-        let current: Element | null = el;
-        while (current && current.nodeType === Node.ELEMENT_NODE) {
-          const tag = current.tagName.toLowerCase();
-          if (current.id) {
-            parts.unshift(`${tag}#${cssEscape(current.id)}`);
-            break;
-          }
-          const parent: Element | null = current.parentElement;
-          if (!parent) {
-            parts.unshift(tag);
-            break;
-          }
-          const currentTag = current.tagName;
-          const siblings = Array.from(parent.children).filter((child: Element) => child.tagName === currentTag);
-          const nth = siblings.length > 1 ? `:nth-of-type(${siblings.indexOf(current) + 1})` : "";
-          parts.unshift(`${tag}${nth}`);
-          current = parent;
-        }
-        return parts.join(" > ");
-      };
-
-      const labelFor = (el: Element) => {
-        const input = el as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
-        const placeholder =
-          el instanceof HTMLInputElement
-            ? el.placeholder
-            : el instanceof HTMLTextAreaElement
-              ? el.placeholder
-              : "";
-        const direct =
-          el.getAttribute("aria-label") ||
-          el.getAttribute("title") ||
-          el.getAttribute("alt") ||
-          placeholder ||
-          input.value ||
-          (el.textContent ?? "");
-        return direct.replace(/\s+/g, " ").trim().slice(0, 160) || null;
-      };
-
-      const candidates = Array.from(document.querySelectorAll(selectors)).filter(visible).slice(0, limit);
-      return candidates.map((el, index) => {
-        const htmlEl = el as HTMLElement;
-        const input = el as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
-        const placeholder =
-          el instanceof HTMLInputElement
-            ? el.placeholder || null
-            : el instanceof HTMLTextAreaElement
-              ? el.placeholder || null
-              : null;
-        const rect = el.getBoundingClientRect();
-        return {
-          ref: `e${index + 1}`,
-          tag: el.tagName.toLowerCase(),
-          role: el.getAttribute("role"),
-          name: labelFor(el),
-          text: (el.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 240) || null,
-          href: el instanceof HTMLAnchorElement ? el.href : null,
-          placeholder,
-          value: "value" in input ? String(input.value || "").slice(0, 240) || null : null,
-          type: el instanceof HTMLInputElement ? el.type : null,
-          disabled: Boolean((input as HTMLInputElement).disabled || htmlEl.getAttribute("aria-disabled") === "true"),
-          selector: selectorFor(el),
-          rect: {
-            x: Math.round(rect.x),
-            y: Math.round(rect.y),
-            width: Math.round(rect.width),
-            height: Math.round(rect.height),
-          },
-        };
-      });
-    }, maxElements);
-
-    refSelectors.clear();
-    for (const element of elements) refSelectors.set(element.ref, element.selector);
-
-    return {
-      url: page.url(),
-      title,
-      elements,
+    const cssEscape = (value: string) => {
+      const css = globalThis.CSS as typeof CSS | undefined;
+      return css?.escape ? css.escape(value) : value.replace(/[^a-zA-Z0-9_-]/g, "\\$&");
     };
+
+    const visible = (el: Element) => {
+      const rect = el.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return false;
+      const style = window.getComputedStyle(el);
+      return style.visibility !== "hidden" && style.display !== "none" && Number(style.opacity || "1") > 0;
+    };
+
+    const selectorFor = (el: Element) => {
+      const parts: string[] = [];
+      let current: Element | null = el;
+      while (current && current.nodeType === Node.ELEMENT_NODE) {
+        const tag = current.tagName.toLowerCase();
+        if (current.id) {
+          parts.unshift(`${tag}#${cssEscape(current.id)}`);
+          break;
+        }
+        const parent: Element | null = current.parentElement;
+        if (!parent) {
+          parts.unshift(tag);
+          break;
+        }
+        const currentTag = current.tagName;
+        const siblings = Array.from(parent.children).filter((child: Element) => child.tagName === currentTag);
+        const nth = siblings.length > 1 ? `:nth-of-type(${siblings.indexOf(current) + 1})` : "";
+        parts.unshift(`${tag}${nth}`);
+        current = parent;
+      }
+      return parts.join(" > ");
+    };
+
+    const labelFor = (el: Element) => {
+      const input = el as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
+      const placeholder =
+        el instanceof HTMLInputElement
+          ? el.placeholder
+          : el instanceof HTMLTextAreaElement
+            ? el.placeholder
+            : "";
+      const direct =
+        el.getAttribute("aria-label") ||
+        el.getAttribute("title") ||
+        el.getAttribute("alt") ||
+        placeholder ||
+        input.value ||
+        (el.textContent ?? "");
+      return direct.replace(/\s+/g, " ").trim().slice(0, 160) || null;
+    };
+
+    const candidates = Array.from(document.querySelectorAll(selectors)).filter(visible).slice(0, limit);
+    return candidates.map((el, index) => {
+      const htmlEl = el as HTMLElement;
+      const input = el as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
+      const placeholder =
+        el instanceof HTMLInputElement
+          ? el.placeholder || null
+          : el instanceof HTMLTextAreaElement
+            ? el.placeholder || null
+            : null;
+      const rect = el.getBoundingClientRect();
+      return {
+        ref: `e${index + 1}`,
+        tag: el.tagName.toLowerCase(),
+        role: el.getAttribute("role"),
+        name: labelFor(el),
+        text: (el.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 240) || null,
+        href: el instanceof HTMLAnchorElement ? el.href : null,
+        placeholder,
+        value: "value" in input ? String(input.value || "").slice(0, 240) || null : null,
+        type: el instanceof HTMLInputElement ? el.type : null,
+        disabled: Boolean((input as HTMLInputElement).disabled || htmlEl.getAttribute("aria-disabled") === "true"),
+        selector: selectorFor(el),
+        rect: {
+          x: Math.round(rect.x),
+          y: Math.round(rect.y),
+          width: Math.round(rect.width),
+          height: Math.round(rect.height),
+        },
+      };
+    });
+  }, maxElements);
+
+  record.refSelectors.clear();
+  for (const element of elements) {
+    if (element && typeof element === "object" && "ref" in element && "selector" in element) {
+      record.refSelectors.set(String(element.ref), String(element.selector));
+    }
   }
 
-  function selectorForRef(ref: string): string {
-    const selector = refSelectors.get(ref);
-    if (!selector) {
-      throw new Error(`Unknown browser ref "${ref}". Call browser_get_state first and use one of the returned refs.`);
+  return {
+    url: page.url(),
+    title,
+    elements: elements as Array<Record<string, unknown>>,
+  };
+}
+
+function selectorForRef(record: SessionRecord, ref: string): string {
+  const selector = record.refSelectors.get(ref);
+  if (!selector) {
+    throw new Error(`Unknown browser ref "${ref}". Call browser_get_state first and use one of the returned refs.`);
+  }
+  return selector;
+}
+
+function hostnameFromUrl(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return "";
+  }
+}
+
+interface CreateOpts {
+  agentId?: string;
+}
+
+export function createPatchrightBrowserMcp(opts: CreateOpts = {}) {
+  const sessionId = randomId("browser");
+  const agentId = opts.agentId;
+
+  async function withSession<T>(fn: (record: SessionRecord) => Promise<T>): Promise<T> {
+    const record = await ensureSession(sessionId, agentId);
+    try {
+      return await fn(record);
+    } finally {
+      const current = activeSessions.get(sessionId);
+      if (current) touchActivity(current);
     }
-    return selector;
   }
 
   return createSdkMcpServer({
     name: "patchright-browser",
-    version: "0.1.0",
+    version: "0.2.0",
     tools: [
       tool(
         "browser_navigate",
         "Open the local Patchright browser if needed and navigate the active tab to a URL.",
         { url: z.string().describe("URL to navigate to. https:// is added when no scheme is provided.") },
-        async ({ url }) => {
-          const page = await getActivePage();
-          await page.goto(normalizeUrl(url), { waitUntil: "domcontentloaded" });
-          return jsonText(await snapshotPage(page, 80));
-        },
+        async ({ url }) =>
+          withSession(async (record) => {
+            const target = normalizeUrl(url);
+            const host = hostnameFromUrl(target);
+            const decision = evaluateHost(host, record.config);
+            if (!decision.allowed) {
+              console.log(`[patchright] blocked navigate session=${record.sessionId} url=${target} reason=${decision.reason}`);
+              return jsonText({ blocked: true, reason: decision.reason, url: target });
+            }
+            const page = await getActivePage(record);
+            await page.goto(target, { waitUntil: "domcontentloaded" });
+            return jsonText(await snapshotPage(record, page, record.config.maxElements));
+          }),
       ),
 
       tool(
         "browser_get_state",
         "Return the active tab URL, title, and interactive page elements with refs for browser_click/browser_type.",
         {
-          maxElements: z.number().int().min(1).max(200).optional().default(80),
+          maxElements: z.number().int().min(1).max(200).optional(),
         },
-        async ({ maxElements }) => {
-          const page = await getActivePage();
-          return jsonText(await snapshotPage(page, maxElements));
-        },
+        async ({ maxElements }) =>
+          withSession(async (record) => {
+            const page = await getActivePage(record);
+            const limit = maxElements ?? record.config.maxElements;
+            return jsonText(await snapshotPage(record, page, limit));
+          }),
       ),
 
       tool(
         "browser_click",
         "Click an element by ref from browser_get_state.",
         { ref: z.string().describe("Element ref from browser_get_state, e.g. e3.") },
-        async ({ ref }) => {
-          const page = await getActivePage();
-          await page.locator(selectorForRef(ref)).first().click();
-          await page.waitForLoadState("domcontentloaded").catch(() => {});
-          return jsonText(await snapshotPage(page, 80));
-        },
+        async ({ ref }) =>
+          withSession(async (record) => {
+            const page = await getActivePage(record);
+            await page.locator(selectorForRef(record, ref)).first().click();
+            await page.waitForLoadState("domcontentloaded").catch(() => {});
+            return jsonText(await snapshotPage(record, page, record.config.maxElements));
+          }),
       ),
 
       tool(
@@ -275,23 +448,24 @@ export function createPatchrightBrowserMcp() {
           submit: z.boolean().optional().default(false).describe("Press Enter after typing/filling."),
           append: z.boolean().optional().default(false).describe("Append keystrokes instead of replacing field content."),
         },
-        async ({ text, ref, submit, append }) => {
-          const page = await getActivePage();
-          if (ref) {
-            const locator = page.locator(selectorForRef(ref)).first();
-            if (append) {
-              await locator.click();
-              await page.keyboard.type(text);
+        async ({ text, ref, submit, append }) =>
+          withSession(async (record) => {
+            const page = await getActivePage(record);
+            if (ref) {
+              const locator = page.locator(selectorForRef(record, ref)).first();
+              if (append) {
+                await locator.click();
+                await page.keyboard.type(text);
+              } else {
+                await locator.fill(text);
+              }
             } else {
-              await locator.fill(text);
+              await page.keyboard.type(text);
             }
-          } else {
-            await page.keyboard.type(text);
-          }
-          if (submit) await page.keyboard.press("Enter");
-          await page.waitForLoadState("domcontentloaded").catch(() => {});
-          return jsonText(await snapshotPage(page, 80));
-        },
+            if (submit) await page.keyboard.press("Enter");
+            await page.waitForLoadState("domcontentloaded").catch(() => {});
+            return jsonText(await snapshotPage(record, page, record.config.maxElements));
+          }),
       ),
 
       tool(
@@ -299,15 +473,17 @@ export function createPatchrightBrowserMcp() {
         "Extract readable text from the current page or from a specific element ref.",
         {
           ref: z.string().optional().describe("Optional element ref from browser_get_state."),
-          maxChars: z.number().int().min(500).max(100_000).optional().default(MAX_TEXT_CHARS),
+          maxChars: z.number().int().min(500).max(100_000).optional(),
         },
-        async ({ ref, maxChars }) => {
-          const page = await getActivePage();
-          const text = ref
-            ? await page.locator(selectorForRef(ref)).first().innerText()
-            : await page.locator("body").innerText();
-          return okText(clampText(text, maxChars));
-        },
+        async ({ ref, maxChars }) =>
+          withSession(async (record) => {
+            const page = await getActivePage(record);
+            const text = ref
+              ? await page.locator(selectorForRef(record, ref)).first().innerText()
+              : await page.locator("body").innerText();
+            const limit = maxChars ?? record.config.maxTextChars;
+            return okText(clampText(text, limit));
+          }),
       ),
 
       tool(
@@ -318,23 +494,25 @@ export function createPatchrightBrowserMcp() {
           deltaY: z.number().optional().default(800).describe("Vertical wheel delta. Positive scrolls down."),
           deltaX: z.number().optional().default(0).describe("Horizontal wheel delta."),
         },
-        async ({ ref, deltaY, deltaX }) => {
-          const page = await getActivePage();
-          if (ref) await page.locator(selectorForRef(ref)).first().scrollIntoViewIfNeeded();
-          await page.mouse.wheel(deltaX, deltaY);
-          return jsonText(await snapshotPage(page, 80));
-        },
+        async ({ ref, deltaY, deltaX }) =>
+          withSession(async (record) => {
+            const page = await getActivePage(record);
+            if (ref) await page.locator(selectorForRef(record, ref)).first().scrollIntoViewIfNeeded();
+            await page.mouse.wheel(deltaX, deltaY);
+            return jsonText(await snapshotPage(record, page, record.config.maxElements));
+          }),
       ),
 
       tool(
         "browser_go_back",
         "Go back in the active tab history.",
         {},
-        async () => {
-          const page = await getActivePage();
-          await page.goBack({ waitUntil: "domcontentloaded" });
-          return jsonText(await snapshotPage(page, 80));
-        },
+        async () =>
+          withSession(async (record) => {
+            const page = await getActivePage(record);
+            await page.goBack({ waitUntil: "domcontentloaded" });
+            return jsonText(await snapshotPage(record, page, record.config.maxElements));
+          }),
       ),
 
       tool(
@@ -342,15 +520,17 @@ export function createPatchrightBrowserMcp() {
         "List tabs in the current Patchright browser session.",
         {},
         async () => {
-          if (!session) return jsonText({ tabs: [] });
+          const record = activeSessions.get(sessionId);
+          if (!record) return jsonText({ tabs: [] });
           const tabs = await Promise.all(
-            session.context.pages().map(async (page, index) => ({
+            record.context.pages().map(async (page, index) => ({
               index,
-              active: page === session?.activePage,
+              active: page === record.activePage,
               url: page.url(),
               title: await page.title().catch(() => ""),
             })),
           );
+          touchActivity(record);
           return jsonText({ tabs });
         },
       ),
@@ -359,14 +539,14 @@ export function createPatchrightBrowserMcp() {
         "browser_switch_tab",
         "Switch the active tab by index from browser_list_tabs.",
         { index: z.number().int().min(0) },
-        async ({ index }) => {
-          const current = await ensureSession();
-          const page = current.context.pages()[index];
-          if (!page) throw new Error(`No browser tab at index ${index}`);
-          current.activePage = page;
-          await page.bringToFront();
-          return jsonText(await snapshotPage(page, 80));
-        },
+        async ({ index }) =>
+          withSession(async (record) => {
+            const page = record.context.pages()[index];
+            if (!page) throw new Error(`No browser tab at index ${index}`);
+            record.activePage = page;
+            await page.bringToFront();
+            return jsonText(await snapshotPage(record, page, record.config.maxElements));
+          }),
       ),
 
       tool(
@@ -374,10 +554,8 @@ export function createPatchrightBrowserMcp() {
         "Close all Patchright browser tabs and the underlying browser context for this agent.",
         {},
         async () => {
-          if (session) await session.context.close().catch(() => {});
-          session = undefined;
-          refSelectors.clear();
-          return okText("Patchright browser session closed.");
+          const closed = await closeSession(sessionId);
+          return okText(closed ? "Patchright browser session closed." : "No active Patchright session to close.");
         },
       ),
     ],

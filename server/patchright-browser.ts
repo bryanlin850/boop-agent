@@ -264,6 +264,14 @@ async function snapshotPage(
 }> {
   const title = await page.title().catch(() => "");
   const elements = await page.evaluate((limit) => {
+    // IMPORTANT: every helper here MUST be a `function` declaration (not
+    // `const f = () => …`). tsx/esbuild adds `__name(fn, "name")` to
+    // arrow functions assigned to consts, and Playwright's evaluate runs
+    // the serialized callback inside its UtilityScript isolated world
+    // where addInitScript helpers are NOT visible — so the eval'd code
+    // throws "ReferenceError: __name is not defined" the moment it
+    // touches one. Function declarations don't need the helper because
+    // they already carry their name natively.
     const selectors = [
       "a[href]",
       "button",
@@ -278,19 +286,19 @@ async function snapshotPage(
       "[onclick]",
     ].join(",");
 
-    const cssEscape = (value: string) => {
+    function cssEscape(value: string): string {
       const css = globalThis.CSS as typeof CSS | undefined;
       return css?.escape ? css.escape(value) : value.replace(/[^a-zA-Z0-9_-]/g, "\\$&");
-    };
+    }
 
-    const visible = (el: Element) => {
+    function visible(el: Element): boolean {
       const rect = el.getBoundingClientRect();
       if (rect.width <= 0 || rect.height <= 0) return false;
       const style = window.getComputedStyle(el);
       return style.visibility !== "hidden" && style.display !== "none" && Number(style.opacity || "1") > 0;
-    };
+    }
 
-    const selectorFor = (el: Element) => {
+    function selectorFor(el: Element): string {
       const parts: string[] = [];
       let current: Element | null = el;
       while (current && current.nodeType === Node.ELEMENT_NODE) {
@@ -305,15 +313,17 @@ async function snapshotPage(
           break;
         }
         const currentTag = current.tagName;
-        const siblings = Array.from(parent.children).filter((child: Element) => child.tagName === currentTag);
+        const siblings = Array.from(parent.children).filter(function (child: Element) {
+          return child.tagName === currentTag;
+        });
         const nth = siblings.length > 1 ? `:nth-of-type(${siblings.indexOf(current) + 1})` : "";
         parts.unshift(`${tag}${nth}`);
         current = parent;
       }
       return parts.join(" > ");
-    };
+    }
 
-    const labelFor = (el: Element) => {
+    function labelFor(el: Element): string | null {
       const input = el as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
       const placeholder =
         el instanceof HTMLInputElement
@@ -329,10 +339,10 @@ async function snapshotPage(
         input.value ||
         (el.textContent ?? "");
       return direct.replace(/\s+/g, " ").trim().slice(0, 160) || null;
-    };
+    }
 
     const candidates = Array.from(document.querySelectorAll(selectors)).filter(visible).slice(0, limit);
-    return candidates.map((el, index) => {
+    return candidates.map(function (el, index) {
       const htmlEl = el as HTMLElement;
       const input = el as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
       const placeholder =

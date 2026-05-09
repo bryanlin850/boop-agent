@@ -195,6 +195,45 @@ export const getStorageUrl = query({
   },
 });
 
+// Store raw bytes (base64) into Convex `_storage` and create a `files` row.
+// Used by tools that produce content directly rather than fetching a URL —
+// e.g. browser_screenshot. Caller sets embedding via files.setEmbedding.
+export const saveBlob = action({
+  args: {
+    fileId: v.string(),
+    name: v.string(),
+    kind: kindV,
+    base64: v.string(),
+    contentType: v.optional(v.string()),
+    description: v.optional(v.string()),
+    tags: v.optional(v.array(v.string())),
+    source: v.optional(v.string()),
+    conversationId: v.optional(v.string()),
+  },
+  handler: async (
+    ctx,
+    args,
+  ): Promise<{ fileId: string; storageId: Id<"_storage"> }> => {
+    const bytes = Uint8Array.from(atob(args.base64), (c) => c.charCodeAt(0));
+    const blob = new Blob([bytes], {
+      type: args.contentType ?? "application/octet-stream",
+    });
+    const storageId = await ctx.storage.store(blob);
+    await ctx.runMutation(api.files.save, {
+      fileId: args.fileId,
+      name: args.name,
+      kind: args.kind,
+      storageId,
+      description: args.description,
+      tags: args.tags,
+      source: args.source,
+      contentType: args.contentType,
+      conversationId: args.conversationId,
+    });
+    return { fileId: args.fileId, storageId };
+  },
+});
+
 // Fetch a remote URL, store the blob in Convex `_storage`, and create a
 // `files` row pointing at it. Used for both inbound SendBlue attachments
 // and files an execution-agent retrieves from Gmail/Drive/etc.

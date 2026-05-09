@@ -4,6 +4,9 @@ import path from "node:path";
 import os from "node:os";
 import fs from "node:fs/promises";
 import { z } from "zod";
+import { api } from "../convex/_generated/api.js";
+import { convex } from "./convex-client.js";
+import { embed } from "./embeddings.js";
 import {
   evaluateHost,
   isPatchrightEnabled as isEnabled,
@@ -373,11 +376,13 @@ function hostnameFromUrl(url: string): string {
 
 interface CreateOpts {
   agentId?: string;
+  conversationId?: string;
 }
 
 export function createPatchrightBrowserMcp(opts: CreateOpts = {}) {
   const sessionId = randomId("browser");
   const agentId = opts.agentId;
+  const conversationId = opts.conversationId;
 
   async function withSession<T>(fn: (record: SessionRecord) => Promise<T>): Promise<T> {
     const record = await ensureSession(sessionId, agentId);
@@ -546,6 +551,56 @@ export function createPatchrightBrowserMcp(opts: CreateOpts = {}) {
             record.activePage = page;
             await page.bringToFront();
             return jsonText(await snapshotPage(record, page, record.config.maxElements));
+          }),
+      ),
+
+      tool(
+        "browser_screenshot",
+        `Capture a screenshot of the active tab and save it to the user's files store. Returns { fileId, url, name } — paste the url into your reply on its own line so iMessage previews the image inline. Use this when the user asks to "see" something visually, when a page result needs visual confirmation, or when text extraction wouldn't capture what they want (charts, screenshots of UIs, etc.).`,
+        {
+          name: z
+            .string()
+            .optional()
+            .describe("Short title for the screenshot. Defaults to '<page-title> screenshot'."),
+          fullPage: z
+            .boolean()
+            .optional()
+            .default(false)
+            .describe("Capture the entire scrollable page instead of just the viewport."),
+          ref: z
+            .string()
+            .optional()
+            .describe("Optional element ref from browser_get_state to screenshot just that element."),
+        },
+        async ({ name, fullPage, ref }) =>
+          withSession(async (record) => {
+            const page = await getActivePage(record);
+            const buffer = ref
+              ? await page.locator(selectorForRef(record, ref)).first().screenshot({ type: "png" })
+              : await page.screenshot({ type: "png", fullPage });
+            const base64 = Buffer.from(buffer).toString("base64");
+            const pageTitle = await page.title().catch(() => "");
+            const pageUrl = page.url();
+            const finalName =
+              name ?? (pageTitle ? `${pageTitle} screenshot` : "browser screenshot");
+            const fileId = randomId("file");
+            await convex.action(api.files.saveBlob, {
+              fileId,
+              name: finalName,
+              kind: "image",
+              base64,
+              contentType: "image/png",
+              description: `Screenshot of ${pageUrl}${pageTitle ? ` — ${pageTitle}` : ""}`,
+              source: "browser",
+              conversationId,
+            });
+            const embedText = `${finalName}\nScreenshot of ${pageUrl}${pageTitle ? ` — ${pageTitle}` : ""}`;
+            const vec = await embed(embedText);
+            if (vec) {
+              await convex.mutation(api.files.setEmbedding, { fileId, embedding: vec });
+            }
+            const url = await convex.query(api.files.getStorageUrl, { fileId });
+            return jsonText({ fileId, name: finalName, url, pageUrl, pageTitle });
           }),
       ),
 

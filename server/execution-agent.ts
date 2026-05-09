@@ -50,7 +50,7 @@ function buildExecutionSystem(patchrightEnabled: boolean): string {
     ? "2. Use your tools — search_reddit for Reddit-specific research, WebSearch, WebFetch, browser tools (when present) for real Chrome automation, and any integrations loaded for this spawn — to investigate and act."
     : "2. Use your tools — search_reddit for Reddit-specific research, WebSearch, WebFetch, and any integrations loaded for this spawn — to investigate and act.";
   const browserDiscipline = patchrightEnabled
-    ? "- Reach for browser tools when WebFetch returns a stub/blocked page, when the page needs JavaScript, login, clicks, scrolling, or form input. Tools: browser_navigate, browser_click, browser_type, browser_get_state, browser_extract_content, browser_scroll, browser_go_back, browser_list_tabs, browser_switch_tab. Always close sessions with browser_close_all when done.\n"
+    ? "- Reach for browser tools when WebFetch returns a stub/blocked page, when the page needs JavaScript, login, clicks, scrolling, or form input. Tools: browser_navigate, browser_click, browser_type, browser_get_state, browser_extract_content, browser_scroll, browser_go_back, browser_list_tabs, browser_switch_tab, browser_screenshot. Always close sessions with browser_close_all when done.\n- browser_screenshot saves to the user's files store and returns a url. Use it whenever the user asks to SEE something or visual confirmation matters; include the returned url on its own line in your final answer so iMessage previews the image.\n"
     : "";
   return `You are a focused background worker for the user.
 
@@ -158,7 +158,9 @@ export async function spawnExecutionAgent(opts: SpawnOptions): Promise<SpawnResu
     ? createDraftStagingMcp(opts.conversationId)
     : undefined;
   const redditServer = redditSearchAvailable() ? createRedditSearchMcp() : undefined;
-  const patchrightBrowserServer = patchrightEnabled ? createPatchrightBrowserMcp({ agentId }) : undefined;
+  const patchrightBrowserServer = patchrightEnabled
+    ? createPatchrightBrowserMcp({ agentId, conversationId: opts.conversationId })
+    : undefined;
   const filesServer = createFilesMcp(opts.conversationId);
   const mcpServers = {
     ...integrationServers,

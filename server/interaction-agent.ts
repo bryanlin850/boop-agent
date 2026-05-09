@@ -7,6 +7,7 @@ import { extractAndStore } from "./memory/extract.js";
 import { availableIntegrations, spawnExecutionAgent } from "./execution-agent.js";
 import { createAutomationMcp } from "./automation-tools.js";
 import { createDraftDecisionMcp } from "./draft-tools.js";
+import { createFilesMcp } from "./file-tools.js";
 import { createSelfMcp } from "./self-tools.js";
 import { getRuntimeModel } from "./runtime-config.js";
 import { broadcast } from "./broadcast.js";
@@ -54,6 +55,7 @@ Tone: Warm, witty, concise. Write like you're texting a friend. No corporate voi
 
 Your only tools:
 - recall / write_memory (durable memory for this user)
+- save_file / lookup_file / list_files / delete_file (saved-files store, separate from memory)
 - spawn_agent (dispatches a sub-agent that CAN touch the world)
 - create_automation / schedule_reminder / list_automations / toggle_automation / delete_automation
 - list_drafts / send_draft / reject_draft
@@ -168,6 +170,45 @@ version, never mind, etc.), call reject_draft.
 
 Never claim something was sent unless send_draft returned success.
 
+Files (separate from memory):
+The user has a saved-files store distinct from memory. Files are deliberate
+and sticky — they don't decay. Use this when the user is handing you a thing
+to keep, not a fact about themselves.
+
+- save_file: when the user says "save this", "remember this PDF", "bookmark
+  this link", or sends an iMessage attachment with intent to keep it. If the
+  message has an [Inbound attachments] block, pass the attachment URL as
+  sourceUrl. For raw text, pass content. For URLs they want bookmarked, pass
+  externalUrl. ALWAYS provide a name — use the user's wording or invent a
+  short title from the content.
+- lookup_file: when the user asks to retrieve something they may have saved
+  ("pull up the office address", "find that espresso note", "show me the
+  lease PDF"). Call this BEFORE spawn_agent. If it hits, you're done.
+- list_files: "what files do I have?", "what did I save?".
+- delete_file: "delete the office address" — pass the fileId from a prior
+  list/lookup.
+
+When lookup_file returns a binary (image/pdf) with a "url" field, paste that
+URL into your reply on its own line — iMessage auto-previews it so the user
+sees the file inline. For text files, just relay the content.
+
+Cross-source retrieval — IMPORTANT:
+The files store is a CACHE, not a complete inventory of the user's data. If
+lookup_file misses AND the user is referencing something that lives in a
+connected source ("the email Sarah sent", "the PDF in my Drive", "that
+attachment from last Tuesday"), spawn_agent with the right integration. Tell
+the spawned agent in the task description: "If you find a useful file or
+attachment, call save_file to cache it before returning." That way the next
+lookup is instant.
+
+Tiebreakers:
+- Save vs. write_memory: prefer save_file when there's an attachment, an
+  explicit name ("save this as X"), or the content is reference material
+  (a snippet, link, doc) rather than a fact about the user. Prefer
+  write_memory for facts ("my landlord is Anna", "I prefer dark mode").
+- Lookup vs. spawn: try lookup_file first; spawn only on miss + integration
+  signal in the user's wording.
+
 Integration capabilities — IMPORTANT:
 You only know integration NAMES, not their actual tool surface. Composio's
 toolkits don't always expose the tools you'd expect from the brand (e.g. the
@@ -216,6 +257,10 @@ interface HandleOpts {
   // role=user, so the synthetic notice the IA receives doesn't pollute the
   // user-message history. Defaults to "user".
   kind?: "user" | "proactive";
+  // iMessage attachments (photos, PDFs) the user sent with this message.
+  // Surfaced to the LLM as an [Inbound attachments] block so it can pass
+  // the URL to save_file when the user says "save this".
+  attachments?: Array<{ url: string; contentType?: string; filename?: string }>;
 }
 
 function randomId(prefix: string): string {
@@ -241,6 +286,7 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
   const memoryServer = createMemoryMcp(opts.conversationId);
   const automationServer = createAutomationMcp(opts.conversationId);
   const draftDecisionServer = createDraftDecisionMcp(opts.conversationId);
+  const filesServer = createFilesMcp(opts.conversationId);
   const selfServer = createSelfMcp();
 
   const ackServer = createSdkMcpServer({
@@ -339,9 +385,21 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
     timezone: process.env.BOOP_DEFAULT_TZ ?? "America/New_York",
   });
 
+  const attachmentBlock =
+    opts.attachments && opts.attachments.length > 0
+      ? "[Inbound attachments]\n" +
+        opts.attachments
+          .map(
+            (a, i) =>
+              `${i}: ${a.contentType ?? "unknown"}${a.filename ? ` (${a.filename})` : ""} ${a.url}`,
+          )
+          .join("\n") +
+        "\n\n"
+      : "";
+
   const prompt = historyBlock
-    ? `Prior turns:\n${historyBlock}\n\nCurrent message:\n${opts.content}`
-    : opts.content;
+    ? `Prior turns:\n${historyBlock}\n\n${attachmentBlock}Current message:\n${opts.content}`
+    : `${attachmentBlock}${opts.content}`;
 
   const tag = opts.turnTag ?? turnId.slice(-6);
   const log = (msg: string) => console.log(`[turn ${tag}] ${msg}`);
@@ -361,6 +419,7 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
           "boop-spawn": spawnServer,
           "boop-automations": automationServer,
           "boop-draft-decisions": draftDecisionServer,
+          "boop-files": filesServer,
           "boop-ack": ackServer,
           "boop-self": selfServer,
         },
@@ -376,6 +435,10 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
           "mcp__boop-draft-decisions__list_drafts",
           "mcp__boop-draft-decisions__send_draft",
           "mcp__boop-draft-decisions__reject_draft",
+          "mcp__boop-files__save_file",
+          "mcp__boop-files__lookup_file",
+          "mcp__boop-files__list_files",
+          "mcp__boop-files__delete_file",
           "mcp__boop-ack__send_ack",
           "mcp__boop-self__get_config",
           "mcp__boop-self__set_model",

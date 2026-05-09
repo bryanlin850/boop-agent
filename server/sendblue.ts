@@ -45,6 +45,23 @@ function headers(): Record<string, string> | null {
   };
 }
 
+// SendBlue's webhook payload uses `media_url` (single string) for inbound
+// attachments today; defensively also accept `media_urls` (array) in case
+// they ever switch shapes for multi-attachment MMS.
+function collectAttachmentUrls(
+  mediaUrl: unknown,
+  mediaUrls: unknown,
+): string[] {
+  const out: string[] = [];
+  if (typeof mediaUrl === "string" && mediaUrl.length > 0) out.push(mediaUrl);
+  if (Array.isArray(mediaUrls)) {
+    for (const u of mediaUrls) {
+      if (typeof u === "string" && u.length > 0 && !out.includes(u)) out.push(u);
+    }
+  }
+  return out;
+}
+
 function normalizeE164(n: string | undefined): string | undefined {
   if (!n) return undefined;
   const trimmed = n.trim();
@@ -56,7 +73,11 @@ function normalizeE164(n: string | undefined): string | undefined {
   return trimmed;
 }
 
-export async function sendImessage(toNumber: string, text: string): Promise<void> {
+export async function sendImessage(
+  toNumber: string,
+  text: string,
+  opts?: { mediaUrl?: string },
+): Promise<void> {
   const h = headers();
   if (!h) {
     console.warn("[sendblue] missing credentials — not sending");
@@ -70,11 +91,24 @@ export async function sendImessage(toNumber: string, text: string): Promise<void
     return;
   }
   const plain = stripMarkdown(text);
-  for (const part of chunk(plain)) {
+  const parts = chunk(plain);
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i];
+    const body: Record<string, unknown> = {
+      number: toNumber,
+      content: part,
+      from_number: from,
+    };
+    // Attach media on the first chunk only — SendBlue's send-message endpoint
+    // takes one media_url per request, and sending it on every chunk would
+    // duplicate the file in the user's thread.
+    if (opts?.mediaUrl && i === 0) {
+      body.media_url = opts.mediaUrl;
+    }
     const res = await fetch(`${API_BASE}/send-message`, {
       method: "POST",
       headers: h,
-      body: JSON.stringify({ number: toNumber, content: part, from_number: from }),
+      body: JSON.stringify(body),
     });
     if (!res.ok) {
       const body = await res.text().catch(() => "");
@@ -123,8 +157,16 @@ export function createSendblueRouter(): express.Router {
   const router = express.Router();
 
   router.post("/webhook", async (req, res) => {
-    const { content, from_number, is_outbound, message_handle } = req.body ?? {};
-    if (is_outbound || !content || !from_number) {
+    const { content, from_number, is_outbound, message_handle, media_url, media_urls } =
+      req.body ?? {};
+    // Allow attachment-only messages (image with no caption). SendBlue still
+    // sends `content` as an empty string in that case; treat empty-content
+    // with attachments as valid input by giving it a placeholder body.
+    const attachments = collectAttachmentUrls(media_url, media_urls);
+    const hasAttachments = attachments.length > 0;
+    const effectiveContent =
+      content && content.length > 0 ? content : hasAttachments ? "(attachment)" : "";
+    if (is_outbound || !effectiveContent || !from_number) {
       res.json({ ok: true, skipped: true });
       return;
     }
@@ -141,19 +183,32 @@ export function createSendblueRouter(): express.Router {
 
     const conversationId = `sms:${from_number}`;
     const turnTag = Math.random().toString(36).slice(2, 8);
-    const preview = content.length > 100 ? content.slice(0, 100) + "…" : content;
-    console.log(`[turn ${turnTag}] ← ${from_number}: ${JSON.stringify(preview)}`);
+    const preview =
+      effectiveContent.length > 100 ? effectiveContent.slice(0, 100) + "…" : effectiveContent;
+    const attachmentTag = hasAttachments ? ` [+${attachments.length} attachment]` : "";
+    console.log(
+      `[turn ${turnTag}] ← ${from_number}: ${JSON.stringify(preview)}${attachmentTag}`,
+    );
     const start = Date.now();
 
-    broadcast("message_in", { conversationId, content, from_number, handle: message_handle });
+    broadcast("message_in", {
+      conversationId,
+      content: effectiveContent,
+      from_number,
+      handle: message_handle,
+      attachments: hasAttachments ? attachments : undefined,
+    });
     res.json({ ok: true });
 
     const stopTyping = startTypingLoop(from_number);
     try {
       const reply = await handleUserMessage({
         conversationId,
-        content,
+        content: effectiveContent,
         turnTag,
+        attachments: hasAttachments
+          ? attachments.map((url) => ({ url }))
+          : undefined,
         onThinking: (t) => broadcast("thinking", { conversationId, t }),
       });
       if (reply) {

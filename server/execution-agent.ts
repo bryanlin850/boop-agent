@@ -4,6 +4,7 @@ import { convex } from "./convex-client.js";
 import { broadcast } from "./broadcast.js";
 import { buildMcpServersForIntegrations, listIntegrations } from "./integrations/registry.js";
 import { createDraftStagingMcp } from "./draft-tools.js";
+import { createFilesMcp } from "./file-tools.js";
 import { aggregateUsageFromResult, EMPTY_USAGE, type UsageTotals } from "./usage.js";
 import { getRuntimeModel } from "./runtime-config.js";
 import { createRedditSearchMcp, redditSearchAvailable } from "./openai-reddit-search.js";
@@ -85,6 +86,19 @@ Style:
 - Under 500 words unless explicitly asked for more.
 - If you can't complete something, say why in one sentence.
 
+Files cache:
+- If you retrieve a file or attachment the user is likely to want again
+  (an email attachment, a Drive doc, a downloaded asset), call save_file to
+  cache it in the user's saved-files store before returning. Pass the
+  download URL as sourceUrl, set kind appropriately (image/pdf/url), and
+  set source to where it came from (e.g. "gmail", "drive"). Then mention
+  in your final answer that you cached it. Next time the user asks, the
+  dispatcher will hit it via lookup_file without spawning you again.
+- Don't cache transient or one-off content (search results, raw web pages
+  the user isn't asking to keep). Cache when the user clearly wants a
+  copy: "find that PDF", "save the receipt from this email", "pull up the
+  contract Anna sent."
+
 Safety:
 - Anything that sends a message, creates an event, or takes an external action: call save_draft with a JSON payload instead of the real send/create tool. Return the summary so the interaction agent can show it to the user.
 - Only the interaction agent's send_draft tool commits. You never commit.`;
@@ -129,6 +143,7 @@ export async function spawnExecutionAgent(opts: SpawnOptions): Promise<SpawnResu
       ...opts.integrations,
       ...(redditSearchAvailable() ? ["boop-reddit-search"] : []),
       ...(patchrightEnabled ? ["patchright-browser"] : []),
+      "boop-files",
     ],
   });
   broadcast("agent_spawned", { agentId, name, task: opts.task });
@@ -144,11 +159,13 @@ export async function spawnExecutionAgent(opts: SpawnOptions): Promise<SpawnResu
     : undefined;
   const redditServer = redditSearchAvailable() ? createRedditSearchMcp() : undefined;
   const patchrightBrowserServer = patchrightEnabled ? createPatchrightBrowserMcp({ agentId }) : undefined;
+  const filesServer = createFilesMcp(opts.conversationId);
   const mcpServers = {
     ...integrationServers,
     ...(redditServer ? { "boop-reddit-search": redditServer } : {}),
     ...(draftServer ? { "boop-drafts": draftServer } : {}),
     ...(patchrightBrowserServer ? { "patchright-browser": patchrightBrowserServer } : {}),
+    "boop-files": filesServer,
   };
   const allowedTools = [
     "WebSearch",

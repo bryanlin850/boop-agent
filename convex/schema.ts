@@ -59,6 +59,46 @@ export default defineSchema({
       filterFields: ["lifecycle"],
     }),
 
+  // User-saved files. Separate namespace from memoryRecords: files are
+  // deliberate and sticky (no decay/consolidation), primarily addressed by
+  // name, with semantic search as a fallback. Reused for both inbound iMessage
+  // attachments and files retrieved by execution-agents from connected
+  // integrations (Gmail, Drive, etc.) — the latter cache here so subsequent
+  // lookups don't need to re-spawn an integration agent.
+  files: defineTable({
+    fileId: v.string(),
+    name: v.string(),
+    kind: v.union(
+      v.literal("text"),
+      v.literal("image"),
+      v.literal("pdf"),
+      v.literal("url"),
+    ),
+    // Text body for kind="text"; for binaries this holds the user-supplied
+    // description and (optionally) extracted text — used for vector search.
+    content: v.optional(v.string()),
+    storageId: v.optional(v.id("_storage")),
+    externalUrl: v.optional(v.string()),
+    description: v.optional(v.string()),
+    tags: v.optional(v.array(v.string())),
+    // Where the file came from: "imessage", "gmail", "drive", "url", etc.
+    // Lets the dispatcher tell the user "(cached from your Gmail on …)".
+    source: v.optional(v.string()),
+    contentType: v.optional(v.string()),
+    embedding: v.optional(v.array(v.float64())),
+    conversationId: v.optional(v.string()),
+    accessCount: v.number(),
+    lastAccessedAt: v.number(),
+    createdAt: v.number(),
+  })
+    .index("by_file_id", ["fileId"])
+    .index("by_name", ["name"])
+    .index("by_conversation", ["conversationId"])
+    .vectorIndex("by_embedding", {
+      vectorField: "embedding",
+      dimensions: 1024,
+    }),
+
   executionAgents: defineTable({
     agentId: v.string(),
     conversationId: v.optional(v.string()),

@@ -178,6 +178,26 @@ async function launchSession(sessionId: string, agentId: string | undefined, con
     viewport: null,
   });
 
+  // tsx/esbuild injects helpers like `__name` (used to set function names on
+  // arrow expressions) into transformed source. When we serialize a callback
+  // into the browser via page.evaluate, the helper definition is left behind
+  // on the Node side, so the callback throws "__name is not defined" the moment
+  // it tries to assign a name. Define no-op stubs in every page's main world
+  // BEFORE any evaluate runs so our snapshot/extract calls don't blow up.
+  // Passed as a string (not a function) so tsx can't transform it and
+  // re-introduce the same problem inside the stub itself.
+  // See: https://github.com/microsoft/playwright/issues/30580
+  await context.addInitScript({
+    content: `
+      if (typeof globalThis.__name !== 'function') {
+        globalThis.__name = function (fn) { return fn; };
+      }
+      if (typeof globalThis.__publicField !== 'function') {
+        globalThis.__publicField = function (obj, key, value) { obj[key] = value; return value; };
+      }
+    `,
+  });
+
   if (config.blockResources.length > 0) {
     const blocked = new Set<string>(config.blockResources);
     await context.route("**/*", (route) => {

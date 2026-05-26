@@ -17,6 +17,19 @@ import { ensureProactiveWatcher } from "./proactive-email.js";
 import { preloadLocalModel } from "./embeddings.js";
 import { createMemoryRouter } from "./memory-routes.js";
 import { listActiveSessions, resetAllProfiles } from "./patchright-browser.js";
+import { createBrowserRouter } from "./browser-routes.js";
+import { closeLocalBrowser } from "./browser/launcher.js";
+import { createChangelogRouter } from "./changelog.js";
+import {
+  getRuntimeConfig,
+  resolveModelInput,
+  resolveReasoningEffortInput,
+  resolveRuntimeInput,
+  setCodexReasoningEffort,
+  setRuntimeModel,
+  setRuntimeProvider,
+} from "./runtime-config.js";
+import { startImageCleanup } from "./images/clean.js";
 
 async function main() {
   await loadIntegrations();
@@ -24,6 +37,7 @@ async function main() {
   startAutomationLoop();
   startHeartbeatLoop();
   startConsolidationLoop();
+  startImageCleanup();
   // No-op when a paid embedding key is set; otherwise downloads/loads the
   // local BGE-large model in the background so the first user-facing
   // recall() doesn't pay the model-load cost.
@@ -53,9 +67,69 @@ async function main() {
     res.json({ ok: true, service: "boop-agent" });
   });
 
+  app.get("/runtime-config", async (_req, res) => {
+    try {
+      res.json(await getRuntimeConfig());
+    } catch (err) {
+      res.status(500).json({ error: String(err) });
+    }
+  });
+
+  app.post("/runtime-config", async (req, res) => {
+    try {
+      const body = req.body as {
+        runtime?: unknown;
+        model?: unknown;
+        reasoningEffort?: unknown;
+      };
+      let runtime =
+        body.runtime === undefined
+          ? undefined
+          : resolveRuntimeInput(String(body.runtime));
+      if (body.runtime !== undefined && !runtime) {
+        res.status(400).json({ error: `Unknown runtime "${String(body.runtime)}"` });
+        return;
+      }
+
+      if (runtime) {
+        await setRuntimeProvider(runtime);
+      }
+
+      runtime ??= (await getRuntimeConfig()).runtime;
+
+      if (body.model !== undefined) {
+        const model = resolveModelInput(String(body.model), runtime);
+        if (!model) {
+          res
+            .status(400)
+            .json({ error: `Unknown ${runtime} model "${String(body.model)}"` });
+          return;
+        }
+        await setRuntimeModel(model, runtime);
+      }
+
+      if (body.reasoningEffort !== undefined) {
+        const effort = resolveReasoningEffortInput(String(body.reasoningEffort));
+        if (!effort) {
+          res.status(400).json({
+            error: `Unknown Codex reasoning effort "${String(body.reasoningEffort)}"`,
+          });
+          return;
+        }
+        await setCodexReasoningEffort(effort);
+      }
+
+      res.json(await getRuntimeConfig());
+    } catch (err) {
+      res.status(500).json({ error: String(err) });
+    }
+  });
+
   app.use("/sendblue", createSendblueRouter());
   app.use("/composio", createComposioRouter());
   app.use("/memory", createMemoryRouter());
+  app.use("/browser", createBrowserRouter());
+  app.use("/changelog", createChangelogRouter());
 
   app.post("/agents/:id/cancel", (req, res) => {
     const ok = cancelAgent(req.params.id);
@@ -106,7 +180,11 @@ async function main() {
       return;
     }
     try {
-      const result = await handleUserMessage({ conversationId, content });
+      const result = await handleUserMessage({
+        conversationId,
+        content,
+        persistAssistantReply: true,
+      });
       res.json({ reply: result.text, mediaUrl: result.mediaUrl });
     } catch (err) {
       console.error(err);
@@ -129,6 +207,18 @@ async function main() {
     console.log(`  sendblue    POST http://localhost:${port}/sendblue/webhook`);
     console.log(`  websocket   WS   ws://localhost:${port}/ws`);
   });
+
+  const signalExitCodes = { SIGTERM: 143, SIGINT: 130, SIGHUP: 129 } as const;
+  let shuttingDown = false;
+  for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"] as const) {
+    process.on(sig, () => {
+      if (shuttingDown) return;
+      shuttingDown = true;
+      closeLocalBrowser()
+        .catch(() => undefined)
+        .finally(() => process.exit(signalExitCodes[sig]));
+    });
+  }
 }
 
 main().catch((err) => {

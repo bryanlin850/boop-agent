@@ -1,12 +1,17 @@
-import { query } from "@anthropic-ai/claude-agent-sdk";
 import { api } from "../convex/_generated/api.js";
 import { convex } from "./convex-client.js";
 import { broadcast } from "./broadcast.js";
-import { buildMcpServersForIntegrations, listIntegrations } from "./integrations/registry.js";
-import { createDraftStagingMcp } from "./draft-tools.js";
+import {
+  buildMcpServersForIntegrations,
+  buildRuntimeToolsForIntegrations,
+  listIntegrations,
+} from "./integrations/registry.js";
+import { createDraftStagingTools } from "./draft-tools.js";
 import { createFilesMcp } from "./file-tools.js";
-import { aggregateUsageFromResult, EMPTY_USAGE, type UsageTotals } from "./usage.js";
-import { getRuntimeModel } from "./runtime-config.js";
+import { EMPTY_USAGE, type UsageTotals } from "./usage.js";
+import { getRuntimeConfig, type RuntimeConfig } from "./runtime-config.js";
+import { runAgentRuntime } from "./runtimes/index.js";
+import { buildPromptWithImages, fetchStoredBytes } from "./images/content-blocks.js";
 import { createRedditSearchMcp, redditSearchAvailable } from "./openai-reddit-search.js";
 import { createPatchrightBrowserMcp, patchrightBrowserAvailable } from "./patchright-browser.js";
 
@@ -45,6 +50,20 @@ function extractAccounts(input: unknown): string[] {
   return [...accounts];
 }
 
+function isBrowserFillTool(toolName: string): boolean {
+  const shortName = toolName.split("__").pop() ?? toolName;
+  return shortName === "browser_fill";
+}
+
+export function redactToolInputForLog(toolName: string, input: unknown): unknown {
+  if (!isBrowserFillTool(toolName)) return input;
+  if (!input || typeof input !== "object" || Array.isArray(input)) return input;
+  return {
+    ...(input as Record<string, unknown>),
+    text: "[redacted]",
+  };
+}
+
 function buildExecutionSystem(patchrightEnabled: boolean): string {
   const toolsLine = patchrightEnabled
     ? "2. Use your tools — search_reddit for Reddit-specific research, WebSearch, WebFetch, browser tools (when present) for real Chrome automation, and any integrations loaded for this spawn — to investigate and act."
@@ -64,6 +83,12 @@ Research discipline:
 - Prefer WebSearch for fresh/factual questions. WebFetch when you need the content of a known URL.
 ${browserDiscipline}- Cite real URLs only — NEVER invent sources. If a page failed to load, say so.
 - Cross-check when it matters: one search is rarely enough for a claim.
+
+Local browser:
+- If the optional "browser" integration is loaded, Local browser use is enabled and it controls a local Patchright Chrome profile on the user's machine.
+- Use browser tools only when native integrations or WebFetch/WebSearch are insufficient: login-only portals, JS-heavy apps, visual workflows, or services likely to detect bots.
+- If you hit a login, MFA, or bot wall and the task requires the user's session, call browser_request_login. It opens a visible local Chrome instance and returns the exact handoff message to show the user.
+- After browser_request_login, stop and tell the user what to do next. Do not claim the task is complete until they confirm they logged in.
 
 MANDATORY: for any task that used WebSearch or WebFetch, end your response with
 a "Sources:" section listing the ACTUAL URLs you fetched or found. Example:
@@ -109,7 +134,11 @@ export interface SpawnOptions {
   integrations: string[];
   conversationId?: string;
   name?: string;
+  runtimeConfig?: RuntimeConfig;
+  imageStorageIds?: string[];
 }
+
+export type SpawnExecutionAgentOpts = SpawnOptions;
 
 export interface SpawnResult {
   agentId: string;
@@ -117,7 +146,7 @@ export interface SpawnResult {
   status: "completed" | "failed" | "cancelled";
 }
 
-export async function spawnExecutionAgent(opts: SpawnOptions): Promise<SpawnResult> {
+export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promise<SpawnResult> {
   const agentId = randomId("agent");
   const name = opts.name ?? (opts.integrations.join("+") || "general");
   const abort = new AbortController();
@@ -128,52 +157,79 @@ export async function spawnExecutionAgent(opts: SpawnOptions): Promise<SpawnResu
   const taskPreview =
     opts.task.length > 120 ? opts.task.slice(0, 120) + "…" : opts.task;
   logAgent(
-    `spawn: ${name} [${opts.integrations.join(", ") || "no integrations"}] — ${JSON.stringify(taskPreview)}`,
+    `spawn: ${name} [${opts.integrations.join(", ") || "no integrations"}] images=${opts.imageStorageIds?.length ?? 0} — ${JSON.stringify(taskPreview)}`,
   );
   const agentStart = Date.now();
+  const runtimeConfig = opts.runtimeConfig ?? (await getRuntimeConfig());
 
-  const patchrightEnabled = await patchrightBrowserAvailable();
+  // Claude-only extras: reddit search and the local Patchright browser MCP. Codex
+  // runs don't get these — they're Claude-runtime MCP servers, not runtime tools.
+  const isClaudeRuntime = runtimeConfig.runtime === "claude";
+  const patchrightEnabled = isClaudeRuntime ? await patchrightBrowserAvailable() : false;
+  const redditEnabled = isClaudeRuntime && redditSearchAvailable();
+
+  // Compose the persisted mcpServers list. For Claude, append the actual extras
+  // that were loaded for this run so the agent record reflects reality. For
+  // Codex, just persist the integrations the caller requested.
+  const persistedMcpServers = isClaudeRuntime
+    ? [
+        ...opts.integrations,
+        ...(redditEnabled ? ["boop-reddit-search"] : []),
+        ...(patchrightEnabled ? ["patchright-browser"] : []),
+        "boop-files",
+      ]
+    : opts.integrations;
 
   await convex.mutation(api.agents.create, {
     agentId,
     conversationId: opts.conversationId,
     name,
     task: opts.task,
-    mcpServers: [
-      ...opts.integrations,
-      ...(redditSearchAvailable() ? ["boop-reddit-search"] : []),
-      ...(patchrightEnabled ? ["patchright-browser"] : []),
-      "boop-files",
-    ],
+    runtime: runtimeConfig.runtime,
+    model: runtimeConfig.model,
+    reasoningEffort: runtimeConfig.reasoningEffort,
+    billingMode: runtimeConfig.billingMode,
+    mcpServers: persistedMcpServers,
   });
   broadcast("agent_spawned", { agentId, name, task: opts.task });
 
   await convex.mutation(api.agents.update, { agentId, status: "running" });
 
-  const integrationServers = await buildMcpServersForIntegrations(
-    opts.integrations,
-    opts.conversationId,
-  );
-  const draftServer = opts.conversationId
-    ? createDraftStagingMcp(opts.conversationId)
-    : undefined;
-  const redditServer = redditSearchAvailable() ? createRedditSearchMcp() : undefined;
+  // Draft staging is wired as runtime tools in both runtimes — the runtime
+  // abstraction handles exposing them as either MCP tools (Claude) or function
+  // tools (Codex).
+  const draftTools = opts.conversationId ? createDraftStagingTools(opts.conversationId) : [];
+
+  const integrationServers = isClaudeRuntime
+    ? await buildMcpServersForIntegrations(opts.integrations, opts.conversationId)
+    : {};
+  const integrationTools =
+    runtimeConfig.runtime === "codex"
+      ? await buildRuntimeToolsForIntegrations(opts.integrations, opts.conversationId)
+      : [];
+
+  // Claude-only MCP servers: reddit search, patchright browser, files cache.
+  const redditServer = redditEnabled ? createRedditSearchMcp() : undefined;
   const patchrightBrowserServer = patchrightEnabled
     ? createPatchrightBrowserMcp({ agentId, conversationId: opts.conversationId })
     : undefined;
-  const filesServer = createFilesMcp(opts.conversationId);
+  const filesServer = isClaudeRuntime ? createFilesMcp(opts.conversationId) : undefined;
+
   const mcpServers = {
     ...integrationServers,
     ...(redditServer ? { "boop-reddit-search": redditServer } : {}),
-    ...(draftServer ? { "boop-drafts": draftServer } : {}),
     ...(patchrightBrowserServer ? { "patchright-browser": patchrightBrowserServer } : {}),
-    "boop-files": filesServer,
+    ...(filesServer ? { "boop-files": filesServer } : {}),
   };
+  const runtimeTools = [...draftTools, ...integrationTools];
+  const runtimeToolNamespaces = [...new Set(integrationTools.map((tool) => tool.namespace))];
   const allowedTools = [
     "WebSearch",
     "WebFetch",
     "Skill",
     ...Object.keys(mcpServers).flatMap((n) => [`mcp__${n}__*`]),
+    ...(draftTools.length ? ["mcp__boop-drafts__*"] : []),
+    ...runtimeToolNamespaces.flatMap((n) => [`mcp__${n}__*`]),
   ];
 
   let buffer = "";
@@ -181,67 +237,53 @@ export async function spawnExecutionAgent(opts: SpawnOptions): Promise<SpawnResu
   let status: "completed" | "failed" | "cancelled" = "completed";
   let errorMsg: string | undefined;
 
-  const requestedModel = await getRuntimeModel();
   try {
-    for await (const msg of query({
-      prompt: opts.task,
-      options: {
-        systemPrompt: buildExecutionSystem(patchrightEnabled),
-        model: requestedModel,
-        mcpServers,
-        allowedTools,
-        // Load .claude/skills/ so the model can invoke SKILL.md playbooks. Without
-        // this the SDK runs in isolation mode and skills are silently ignored.
-        settingSources: ["project"],
-        permissionMode: "bypassPermissions",
-        abortController: abort,
+    const executionPrompt = await buildPromptWithImages({
+      text: opts.task,
+      imageStorageIds: opts.imageStorageIds,
+      fetchBytes: fetchStoredBytes,
+    });
+    const result = await runAgentRuntime(runtimeConfig, {
+      prompt: executionPrompt,
+      systemPrompt: buildExecutionSystem(patchrightEnabled),
+      claudeMcpServers: mcpServers,
+      tools: runtimeTools,
+      allowedTools,
+      abortController: abort,
+      mode: "execution",
+      onText: async (text) => {
+        buffer += text;
+        await convex.mutation(api.agents.addLog, {
+          agentId,
+          logType: "text",
+          content: text,
+        });
       },
-    })) {
-      if (msg.type === "assistant") {
-        for (const block of msg.message.content) {
-          if (block.type === "text") {
-            buffer += block.text;
-            await convex.mutation(api.agents.addLog, {
-              agentId,
-              logType: "text",
-              content: block.text,
-            });
-          } else if (block.type === "tool_use") {
-            const toolShort = block.name.replace(/^mcp__[a-z-]+__/, "");
-            const accounts = extractAccounts(block.input);
-            const acctSuffix = accounts.length ? ` [${accounts.join(", ")}]` : "";
-            logAgent(`tool: ${toolShort}${acctSuffix}`);
-            await convex.mutation(api.agents.addLog, {
-              agentId,
-              logType: "tool_use",
-              toolName: block.name,
-              ...(accounts.length ? { accounts } : {}),
-              content: JSON.stringify(block.input).slice(0, 2000),
-            });
-            broadcast("agent_tool", { agentId, toolName: block.name, accounts });
-          }
-        }
-      } else if (msg.type === "user") {
-        for (const block of msg.message.content) {
-          if (block.type === "tool_result") {
-            const text = Array.isArray(block.content)
-              ? block.content
-                  .map((c: { type: string; text?: string }) => (c.type === "text" ? (c.text ?? "") : ""))
-                  .join("")
-              : String(block.content ?? "");
-            await convex.mutation(api.agents.addLog, {
-              agentId,
-              logType: "tool_result",
-              content: text.slice(0, 2000),
-            });
-          }
-        }
-      } else if (msg.type === "result") {
-        // Always take the aggregate from modelUsage — msg.usage is just the
-        // final turn's raw tokens and massively undercounts on tool-heavy runs.
-        usage = aggregateUsageFromResult(msg, requestedModel);
-      }
-    }
+      onToolUse: async (toolName, input) => {
+        const toolShort = toolName.replace(/^mcp__[a-z-]+__/, "");
+        const accounts = extractAccounts(input);
+        const acctSuffix = accounts.length ? ` [${accounts.join(", ")}]` : "";
+        logAgent(`tool: ${toolShort}${acctSuffix}`);
+        const logInput = redactToolInputForLog(toolName, input);
+        await convex.mutation(api.agents.addLog, {
+          agentId,
+          logType: "tool_use",
+          toolName,
+          ...(accounts.length ? { accounts } : {}),
+          content: JSON.stringify(logInput).slice(0, 2000),
+        });
+        broadcast("agent_tool", { agentId, toolName, accounts });
+      },
+      onToolResult: async (_toolName, text) => {
+        await convex.mutation(api.agents.addLog, {
+          agentId,
+          logType: "tool_result",
+          content: text.slice(0, 2000),
+        });
+      },
+    });
+    if (!buffer) buffer = result.text;
+    usage = result.usage;
   } catch (err) {
     status = abort.signal.aborted ? "cancelled" : "failed";
     errorMsg = String(err);
@@ -276,6 +318,8 @@ export async function spawnExecutionAgent(opts: SpawnOptions): Promise<SpawnResu
       source: "execution",
       conversationId: opts.conversationId,
       agentId,
+      runtime: runtimeConfig.runtime,
+      billingMode: runtimeConfig.billingMode,
       model: usage.model,
       inputTokens: usage.inputTokens,
       outputTokens: usage.outputTokens,
@@ -304,11 +348,25 @@ export function runningAgentIds(): string[] {
 export async function retryAgent(agentId: string): Promise<SpawnResult | null> {
   const existing = await convex.query(api.agents.get, { agentId });
   if (!existing) return null;
+  const originalRuntime = existing as typeof existing & Partial<RuntimeConfig>;
+  const runtimeConfig =
+    originalRuntime.runtime && originalRuntime.model && originalRuntime.billingMode
+      ? {
+          runtime: originalRuntime.runtime,
+          model: originalRuntime.model,
+          reasoningEffort: originalRuntime.reasoningEffort,
+          billingMode: originalRuntime.billingMode,
+        }
+      : undefined;
+  // V1 limitation: image refs are not persisted to executionAgents and
+  // therefore are not replayed on retry. Re-trigger from the original
+  // turn if you need the image inputs.
   return await spawnExecutionAgent({
     task: existing.task,
     integrations: existing.mcpServers,
     conversationId: existing.conversationId,
     name: existing.name,
+    runtimeConfig,
   });
 }
 

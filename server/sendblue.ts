@@ -3,6 +3,7 @@ import { api } from "../convex/_generated/api.js";
 import { convex } from "./convex-client.js";
 import { handleUserMessage } from "./interaction-agent.js";
 import { broadcast } from "./broadcast.js";
+import { validateImageHeader, MAX_IMAGE_BYTES, type ImageMediaType } from "./images/mime.js";
 
 const API_BASE = "https://api.sendblue.com/api";
 const MAX_CHUNK = 2900;
@@ -43,23 +44,6 @@ function headers(): Record<string, string> | null {
     "sb-api-key-id": apiKey,
     "sb-api-secret-key": apiSecret,
   };
-}
-
-// SendBlue's webhook payload uses `media_url` (single string) for inbound
-// attachments today; defensively also accept `media_urls` (array) in case
-// they ever switch shapes for multi-attachment MMS.
-function collectAttachmentUrls(
-  mediaUrl: unknown,
-  mediaUrls: unknown,
-): string[] {
-  const out: string[] = [];
-  if (typeof mediaUrl === "string" && mediaUrl.length > 0) out.push(mediaUrl);
-  if (Array.isArray(mediaUrls)) {
-    for (const u of mediaUrls) {
-      if (typeof u === "string" && u.length > 0 && !out.includes(u)) out.push(u);
-    }
-  }
-  return out;
 }
 
 function normalizeE164(n: string | undefined): string | undefined {
@@ -156,20 +140,106 @@ export function startTypingLoop(toNumber: string): () => void {
   return () => clearInterval(timer);
 }
 
+type IngestedImage = { storageId: string; mediaType: ImageMediaType };
+
+export async function ingestSendblueImage(
+  url: string,
+): Promise<{ ok: true; image: IngestedImage } | { ok: false; reason: string }> {
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: "GET",
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch (err) {
+    return { ok: false, reason: `download failed: ${String(err)}` };
+  }
+  if (!res.ok) {
+    return { ok: false, reason: `download failed: HTTP ${res.status}` };
+  }
+  const lenHeader = res.headers.get("content-length");
+  const contentLength = lenHeader ? Number(lenHeader) : undefined;
+  const check = validateImageHeader({
+    contentType: res.headers.get("content-type") ?? undefined,
+    contentLength,
+  });
+  if (!check.ok) {
+    res.body?.cancel().catch(() => undefined);
+    return { ok: false, reason: check.reason };
+  }
+  // Stream the body so we can abort early when the running total exceeds
+  // MAX_IMAGE_BYTES — content-length is often absent on CDN/redirect
+  // responses, and `await res.arrayBuffer()` would otherwise buffer the
+  // entire payload before any cap check fires.
+  let buf: ArrayBuffer;
+  try {
+    const reader = res.body?.getReader();
+    if (!reader) return { ok: false, reason: "download failed: no body" };
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > MAX_IMAGE_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        return {
+          ok: false,
+          reason: `image too large: >${MAX_IMAGE_BYTES} bytes`,
+        };
+      }
+      chunks.push(value);
+    }
+    buf = new ArrayBuffer(total);
+    const view = new Uint8Array(buf);
+    let offset = 0;
+    for (const c of chunks) {
+      view.set(c, offset);
+      offset += c.byteLength;
+    }
+  } catch (err) {
+    return { ok: false, reason: `download failed: ${String(err)}` };
+  }
+
+  try {
+    const uploadUrl = await convex.mutation(api.messages.generateUploadUrl, {});
+    const upload = await fetch(uploadUrl, {
+      method: "POST",
+      headers: { "Content-Type": check.mediaType },
+      body: buf,
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!upload.ok) {
+      return { ok: false, reason: `upload failed: HTTP ${upload.status}` };
+    }
+    const { storageId } = (await upload.json()) as { storageId: string };
+    return { ok: true, image: { storageId, mediaType: check.mediaType } };
+  } catch (err) {
+    return { ok: false, reason: `upload failed: ${String(err)}` };
+  }
+}
+
 export function createSendblueRouter(): express.Router {
   const router = express.Router();
 
   router.post("/webhook", async (req, res) => {
     const { content, from_number, is_outbound, message_handle, media_url, media_urls } =
       req.body ?? {};
+    const rawUrls: string[] = [];
+    if (Array.isArray(media_urls)) {
+      for (const u of media_urls) {
+        if (typeof u === "string" && u.length > 0) rawUrls.push(u);
+      }
+    } else if (typeof media_url === "string" && media_url.length > 0) {
+      rawUrls.push(media_url);
+    }
+    const hasAttachments = rawUrls.length > 0;
     // Allow attachment-only messages (image with no caption). SendBlue still
     // sends `content` as an empty string in that case; treat empty-content
     // with attachments as valid input by giving it a placeholder body.
-    const attachments = collectAttachmentUrls(media_url, media_urls);
-    const hasAttachments = attachments.length > 0;
     const effectiveContent =
       content && content.length > 0 ? content : hasAttachments ? "(attachment)" : "";
-    if (is_outbound || !effectiveContent || !from_number) {
+    if (is_outbound || !from_number || !effectiveContent) {
       res.json({ ok: true, skipped: true });
       return;
     }
@@ -184,11 +254,19 @@ export function createSendblueRouter(): express.Router {
       }
     }
 
+    const ingestResults = await Promise.all(rawUrls.map(ingestSendblueImage));
+    const ingested: IngestedImage[] = [];
+    const ingestErrors: string[] = [];
+    for (const r of ingestResults) {
+      if (r.ok) ingested.push(r.image);
+      else ingestErrors.push(r.reason);
+    }
+
     const conversationId = `sms:${from_number}`;
     const turnTag = Math.random().toString(36).slice(2, 8);
     const preview =
       effectiveContent.length > 100 ? effectiveContent.slice(0, 100) + "…" : effectiveContent;
-    const attachmentTag = hasAttachments ? ` [+${attachments.length} attachment]` : "";
+    const attachmentTag = hasAttachments ? ` [+${rawUrls.length} attachment]` : "";
     console.log(
       `[turn ${turnTag}] ← ${from_number}: ${JSON.stringify(preview)}${attachmentTag}`,
     );
@@ -199,7 +277,7 @@ export function createSendblueRouter(): express.Router {
       content: effectiveContent,
       from_number,
       handle: message_handle,
-      attachments: hasAttachments ? attachments : undefined,
+      attachments: hasAttachments ? rawUrls : undefined,
     });
     res.json({ ok: true });
 
@@ -209,9 +287,8 @@ export function createSendblueRouter(): express.Router {
         conversationId,
         content: effectiveContent,
         turnTag,
-        attachments: hasAttachments
-          ? attachments.map((url) => ({ url }))
-          : undefined,
+        images: ingested,
+        mediaError: ingestErrors.length > 0 ? ingestErrors.join("; ") : undefined,
         onThinking: (t) => broadcast("thinking", { conversationId, t }),
       });
       const replyText = result.text;

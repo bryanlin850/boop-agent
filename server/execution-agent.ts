@@ -1,3 +1,4 @@
+import { z } from "zod";
 import { api } from "../convex/_generated/api.js";
 import { convex } from "./convex-client.js";
 import { broadcast } from "./broadcast.js";
@@ -11,9 +12,13 @@ import { createFilesMcp } from "./file-tools.js";
 import { EMPTY_USAGE, type UsageTotals } from "./usage.js";
 import { getRuntimeConfig, type RuntimeConfig } from "./runtime-config.js";
 import { runAgentRuntime } from "./runtimes/index.js";
+import { defineRuntimeTool } from "./runtimes/tool.js";
+import { runtimeText, type RuntimeTool } from "./runtimes/types.js";
 import { buildPromptWithImages, fetchStoredBytes } from "./images/content-blocks.js";
 import { createRedditSearchMcp, redditSearchAvailable } from "./openai-reddit-search.js";
 import { createPatchrightBrowserMcp, patchrightBrowserAvailable } from "./patchright-browser.js";
+
+const AUTOMATION_NOTIFY_NAMESPACE = "boop-automation-notify";
 
 const running = new Map<string, AbortController>();
 
@@ -64,7 +69,10 @@ export function redactToolInputForLog(toolName: string, input: unknown): unknown
   };
 }
 
-function buildExecutionSystem(patchrightEnabled: boolean): string {
+function buildExecutionSystem(
+  patchrightEnabled: boolean,
+  automationNotifyEnabled: boolean,
+): string {
   const toolsLine = patchrightEnabled
     ? "2. Use your tools — search_reddit for Reddit-specific research, WebSearch, WebFetch, browser tools (when present) for real Chrome automation, and any integrations loaded for this spawn — to investigate and act."
     : "2. Use your tools — search_reddit for Reddit-specific research, WebSearch, WebFetch, and any integrations loaded for this spawn — to investigate and act.";
@@ -126,7 +134,32 @@ Files cache:
 
 Safety:
 - Anything that sends a message, creates an event, or takes an external action: call save_draft with a JSON payload instead of the real send/create tool. Return the summary so the interaction agent can show it to the user.
-- Only the interaction agent's send_draft tool commits. You never commit.`;
+- Only the interaction agent's send_draft tool commits. You never commit.${
+    automationNotifyEnabled
+      ? `
+
+Automation notification contract:
+- You are running as a scheduled automation. The user does NOT see your final assistant message — that goes to the run log only.
+- To deliver something to the user, call the \`notify\` tool with the exact text you want them to receive. You may call \`notify\` multiple times; the chunks will be concatenated in order with blank lines between them.
+- If nothing happened worth pinging the user about (e.g. "price unchanged", "no new emails", "still no replies"), do NOT call \`notify\`. Silence is the default and nothing will be delivered. Just explain in your final assistant message why you stayed quiet — that goes to the run log for debugging.
+- Do NOT use \`notify\` to narrate your process. Use it only for the final user-facing message.`
+      : ""
+  }`;
+}
+
+function createAutomationNotifyTool(notifications: string[]): RuntimeTool {
+  return defineRuntimeTool(
+    AUTOMATION_NOTIFY_NAMESPACE,
+    "notify",
+    `Deliver a message to the user for this automation run. Call once with the exact text to deliver. You may call multiple times to send multiple chunks (they'll be concatenated in order). If nothing is worth notifying about, do NOT call this tool — silence is the default and nothing will be sent.`,
+    {
+      message: z.string().describe("The exact text to deliver to the user."),
+    },
+    async (args) => {
+      notifications.push(args.message);
+      return runtimeText("Notification queued.");
+    },
+  );
 }
 
 export interface SpawnOptions {
@@ -136,6 +169,12 @@ export interface SpawnOptions {
   name?: string;
   runtimeConfig?: RuntimeConfig;
   imageStorageIds?: string[];
+  /**
+   * When true, the agent gets a `notify` tool and silence-is-default semantics.
+   * The captured calls come back as `SpawnResult.notification`. Automation
+   * runs set this; ad-hoc spawns from the interaction agent or drafts don't.
+   */
+  automationNotify?: boolean;
 }
 
 export type SpawnExecutionAgentOpts = SpawnOptions;
@@ -144,6 +183,13 @@ export interface SpawnResult {
   agentId: string;
   result: string;
   status: "completed" | "failed" | "cancelled";
+  /**
+   * Concatenated messages the agent passed to the `notify` tool, joined with
+   * blank lines. Undefined when `automationNotify` was off or the agent never
+   * called `notify`. Automation runners use this — not `result` — to decide
+   * what to deliver to the user.
+   */
+  notification?: string;
 }
 
 export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promise<SpawnResult> {
@@ -215,13 +261,21 @@ export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promis
     : undefined;
   const filesServer = isClaudeRuntime ? createFilesMcp(opts.conversationId) : undefined;
 
+  // Automation notify wiring: when this spawn is an automation run with a
+  // notification target, give the agent a `notify` tool whose calls we capture
+  // here. The automation runner uses the captured text to decide what to ship.
+  const notifications: string[] = [];
+  const notifyTools: RuntimeTool[] = opts.automationNotify
+    ? [createAutomationNotifyTool(notifications)]
+    : [];
+
   const mcpServers = {
     ...integrationServers,
     ...(redditServer ? { "boop-reddit-search": redditServer } : {}),
     ...(patchrightBrowserServer ? { "patchright-browser": patchrightBrowserServer } : {}),
     ...(filesServer ? { "boop-files": filesServer } : {}),
   };
-  const runtimeTools = [...draftTools, ...integrationTools];
+  const runtimeTools = [...draftTools, ...integrationTools, ...notifyTools];
   const runtimeToolNamespaces = [...new Set(integrationTools.map((tool) => tool.namespace))];
   const allowedTools = [
     "WebSearch",
@@ -230,6 +284,7 @@ export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promis
     ...Object.keys(mcpServers).flatMap((n) => [`mcp__${n}__*`]),
     ...(draftTools.length ? ["mcp__boop-drafts__*"] : []),
     ...runtimeToolNamespaces.flatMap((n) => [`mcp__${n}__*`]),
+    ...(notifyTools.length ? [`mcp__${AUTOMATION_NOTIFY_NAMESPACE}__*`] : []),
   ];
 
   let buffer = "";
@@ -245,7 +300,7 @@ export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promis
     });
     const result = await runAgentRuntime(runtimeConfig, {
       prompt: executionPrompt,
-      systemPrompt: buildExecutionSystem(patchrightEnabled),
+      systemPrompt: buildExecutionSystem(patchrightEnabled, !!opts.automationNotify),
       claudeMcpServers: mcpServers,
       tools: runtimeTools,
       allowedTools,
@@ -331,7 +386,8 @@ export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promis
   }
   broadcast("agent_done", { agentId, status, result: buffer.slice(0, 200) });
 
-  return { agentId, result: buffer || errorMsg || "(no output)", status };
+  const notification = notifications.length ? notifications.join("\n\n") : undefined;
+  return { agentId, result: buffer || errorMsg || "(no output)", status, notification };
 }
 
 export function cancelAgent(agentId: string): boolean {

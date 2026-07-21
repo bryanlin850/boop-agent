@@ -60,24 +60,29 @@ async function runAutomation(a: {
       integrations: a.integrations,
       conversationId: a.conversationId,
       name: `auto:${a.name}`,
+      automationNotify: !!a.notifyConversationId,
     });
     await convex.mutation(api.automations.updateRun, {
       runId,
       status: res.status === "completed" ? "completed" : "failed",
       result: res.result,
+      notification: res.notification,
       agentId: res.agentId,
     });
 
-    if (a.notifyConversationId && res.result) {
+    // Strict opt-in delivery: only ship what the agent explicitly passed to the
+    // `notify` tool. Its final assistant text (`res.result`) is for the run log
+    // only — never delivered. If the agent didn't call notify, this run is silent.
+    if (a.notifyConversationId && res.notification) {
       if (a.notifyConversationId.startsWith("sms:")) {
         const number = a.notifyConversationId.slice(4);
         const preamble = `[${a.name}]\n\n`;
-        await sendImessage(number, preamble + res.result);
+        await sendImessage(number, preamble + res.notification);
       }
       await convex.mutation(api.messages.send, {
         conversationId: a.notifyConversationId,
         role: "assistant",
-        content: `[${a.name}]\n\n${res.result}`,
+        content: `[${a.name}]\n\n${res.notification}`,
       });
     }
 

@@ -8,6 +8,7 @@ describe("direct runtime switching", () => {
   it("detects explicit Codex switch requests", () => {
     expect(resolveDirectRuntimeSwitch("Switch to codex")).toBe("codex");
     expect(resolveDirectRuntimeSwitch("can you switch to ChatGPT?")).toBe("codex");
+    expect(resolveDirectRuntimeSwitch("swap to codex")).toBe("codex");
     expect(resolveDirectRuntimeSwitch("please use chatgpt codex for the next turn")).toBe(
       "codex",
     );

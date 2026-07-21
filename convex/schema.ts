@@ -279,6 +279,9 @@ export default defineSchema({
       v.literal("failed"),
     ),
     result: v.optional(v.string()),
+    // What the agent passed to `notify` (concatenated). Absent when the agent
+    // stayed silent — useful for debugging "the cron ran but I got no ping".
+    notification: v.optional(v.string()),
     error: v.optional(v.string()),
     agentId: v.optional(v.string()),
     startedAt: v.number(),

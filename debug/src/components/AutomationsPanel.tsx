@@ -355,15 +355,35 @@ function AutomationDetail({
                       {run.status}
                     </span>
                     <span
+                      className={`text-[10px] font-bold mono w-16 shrink-0 ${
+                        run.notification
+                          ? isDark
+                            ? "text-emerald-400"
+                            : "text-emerald-600"
+                          : isDark
+                            ? "text-zinc-600"
+                            : "text-zinc-400"
+                      }`}
+                      title={
+                        run.notification
+                          ? `Delivered to user:\n\n${run.notification}`
+                          : "No notification sent"
+                      }
+                    >
+                      {run.notification ? "notified" : "silent"}
+                    </span>
+                    <span
                       className={`text-xs flex-1 truncate ${
                         isDark ? "text-slate-400" : "text-slate-600"
                       }`}
                     >
-                      {run.result
-                        ? run.result.slice(0, 120)
-                        : run.error
-                          ? run.error.slice(0, 120)
-                          : "—"}
+                      {run.notification
+                        ? run.notification.slice(0, 120)
+                        : run.result
+                          ? run.result.slice(0, 120)
+                          : run.error
+                            ? run.error.slice(0, 120)
+                            : "—"}
                     </span>
                     <span
                       className={`text-[10px] mono shrink-0 ${

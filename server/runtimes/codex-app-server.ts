@@ -1,6 +1,8 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { once } from "node:events";
 import {
+  accessSync,
+  constants,
   copyFileSync,
   existsSync,
   mkdirSync,
@@ -10,7 +12,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import readline from "node:readline";
 import type { ClientNotification } from "./codex-app-server-protocol/ClientNotification.js";
 import type { ClientRequest } from "./codex-app-server-protocol/ClientRequest.js";
@@ -87,12 +89,56 @@ function createIsolatedCodexHome(): string {
   return codexHome;
 }
 
+function isExecutable(path: string): boolean {
+  try {
+    accessSync(path, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+type ResolveCodexCommandOptions = {
+  configured?: string;
+  path?: string;
+  platform?: NodeJS.Platform;
+  home?: string;
+  executable?: (path: string) => boolean;
+};
+
+export function resolveCodexCommand(options: ResolveCodexCommandOptions = {}): string {
+  const configured = (options.configured ?? process.env.BOOP_CODEX_BIN)?.trim();
+  if (configured) return configured;
+
+  const platform = options.platform ?? process.platform;
+  const home = options.home ?? homedir();
+  const executable = options.executable ?? isExecutable;
+  const binaryNames =
+    platform === "win32" ? ["codex.cmd", "codex.exe", "codex"] : ["codex"];
+  const pathCandidates = (options.path ?? process.env.PATH ?? "")
+    .split(delimiter)
+    .filter(Boolean)
+    .flatMap((dir) => binaryNames.map((name) => join(dir, name)));
+  const macAppCandidates =
+    platform === "darwin"
+      ? [
+          "/Applications/Codex.app/Contents/Resources/codex",
+          "/Applications/ChatGPT.app/Contents/Resources/codex",
+          join(home, "Applications/Codex.app/Contents/Resources/codex"),
+          join(home, "Applications/ChatGPT.app/Contents/Resources/codex"),
+        ]
+      : [];
+
+  return [...pathCandidates, ...macAppCandidates].find(executable) ?? "codex";
+}
+
 function spawnCodexAppServer(): {
   child: ChildProcessWithoutNullStreams;
   codexHome: string;
 } {
   const codexHome = createIsolatedCodexHome();
   const env = { ...process.env, CODEX_HOME: codexHome };
+  const codexCommand = resolveCodexCommand();
   const args = [
     "app-server",
     "--listen",
@@ -119,7 +165,7 @@ function spawnCodexAppServer(): {
   if (process.platform === "win32") {
     return {
       codexHome,
-      child: spawn("cmd", ["/d", "/s", "/c", "codex", ...args], {
+      child: spawn("cmd", ["/d", "/s", "/c", codexCommand, ...args], {
         env,
         stdio: ["pipe", "pipe", "pipe"],
       }),
@@ -127,7 +173,7 @@ function spawnCodexAppServer(): {
   }
   return {
     codexHome,
-    child: spawn("codex", args, {
+    child: spawn(codexCommand, args, {
       env,
       stdio: ["pipe", "pipe", "pipe"],
     }),
@@ -244,6 +290,14 @@ class CodexAppServerClient {
   private currentAgentMessageText = "";
   private usage: UsageTotals = { ...EMPTY_USAGE };
 
+  private failPending(err: Error): void {
+    for (const pending of this.pending.values()) pending.reject(err);
+    this.pending.clear();
+    const turnCompletion = this.turnCompletion;
+    this.turnCompletion = null;
+    turnCompletion?.reject(err);
+  }
+
   async run(request: RuntimeRunRequest): Promise<RuntimeRunResult> {
     this.request = request;
     const availableTools = request.tools.filter((runtimeTool) =>
@@ -287,13 +341,11 @@ class CodexAppServerClient {
         console.warn(`[codex-app-server] ${text}`);
       }
     });
+    this.child.on("error", (err) => {
+      this.failPending(new Error(`codex app-server failed to start: ${formatError(err)}`));
+    });
     this.child.on("exit", (code, signal) => {
-      const err = new Error(`codex app-server exited (${code ?? signal ?? "unknown"})`);
-      for (const pending of this.pending.values()) pending.reject(err);
-      this.pending.clear();
-      const turnCompletion = this.turnCompletion;
-      this.turnCompletion = null;
-      turnCompletion?.reject(err);
+      this.failPending(new Error(`codex app-server exited (${code ?? signal ?? "unknown"})`));
     });
 
     try {
@@ -408,6 +460,13 @@ class CodexAppServerClient {
       this.currentAgentMessageText += delta;
       this.reply = this.currentAgentMessageText || this.reply;
       void this.request?.onText?.(delta);
+    } else if (message.method === "item/completed") {
+      const { item } = message.params;
+      if (item.type === "agentMessage" && item.text.trim()) {
+        this.currentAgentMessageId = item.id;
+        this.currentAgentMessageText = item.text;
+        this.reply = item.text;
+      }
     } else if (message.method === "turn/completed") {
       const turnId = message.params.turn.id;
       if (turnId) this.completedTurns.add(turnId);

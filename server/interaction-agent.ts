@@ -354,7 +354,7 @@ export function resolveDirectRuntimeSwitch(content: string): "claude" | "codex" 
     .replace(/[.!?]+$/g, "")
     .replace(/\s+/g, " ");
   const match = normalized.match(
-    /^(?:please |pls |can you )?(?:switch|change|set|use|move|flip)(?: me| boop)?(?: (?:runtime|provider))?(?: back| over)?(?: to)? (?<runtime>claude agent sdk|chatgpt codex|anthropic|claude|codex|chatgpt)(?: runtime| provider)?(?: for (?:the )?next turn)?(?: please)?$/,
+    /^(?:please |pls |can you )?(?:switch|change|set|use|move|flip|swap)(?: me| boop)?(?: (?:runtime|provider))?(?: back| over)?(?: to)? (?<runtime>claude agent sdk|chatgpt codex|anthropic|claude|codex|chatgpt)(?: runtime| provider)?(?: for (?:the )?next turn)?(?: please)?$/,
   );
   if (!match?.groups?.runtime) return null;
   return resolveRuntimeInput(match.groups.runtime);

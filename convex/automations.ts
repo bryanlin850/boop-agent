@@ -127,6 +127,7 @@ export const updateRun = mutation({
     runId: v.string(),
     status: v.union(v.literal("running"), v.literal("completed"), v.literal("failed")),
     result: v.optional(v.string()),
+    notification: v.optional(v.string()),
     error: v.optional(v.string()),
     agentId: v.optional(v.string()),
   },

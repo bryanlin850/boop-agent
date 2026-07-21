@@ -1,5 +1,6 @@
-import { mutation, query } from "./_generated/server";
+import { mutation, query, type QueryCtx } from "./_generated/server";
 import { v } from "convex/values";
+import { DEMO_SCAN_LIMIT, isDemoAutomationRun, isDemoId, isDemoModeEnabled } from "./demoMode";
 
 export const create = mutation({
   args: {
@@ -36,25 +37,48 @@ export const create = mutation({
   },
 });
 
-export const list = query({
-  args: { enabledOnly: v.optional(v.boolean()) },
-  handler: async (ctx, args) => {
-    let results;
-    if (args.enabledOnly) {
-      results = await ctx.db
+async function readAutomations(
+  ctx: QueryCtx,
+  enabledOnly: boolean | undefined,
+  demoOnly: boolean,
+) {
+  const rows = enabledOnly
+    ? await ctx.db
         .query("automations")
         .withIndex("by_enabled", (q) => q.eq("enabled", true))
-        .collect();
-    } else {
-      results = await ctx.db.query("automations").order("desc").collect();
-    }
-    return results;
+        .order("desc")
+        .take(DEMO_SCAN_LIMIT)
+    : await ctx.db.query("automations").order("desc").take(DEMO_SCAN_LIMIT);
+  return rows.filter((automation) => isDemoId(automation.automationId) === demoOnly);
+}
+
+export const list = query({
+  args: { enabledOnly: v.optional(v.boolean()) },
+  handler: async (ctx, args) => readAutomations(ctx, args.enabledOnly, false),
+});
+
+export const listForDashboard = query({
+  args: { enabledOnly: v.optional(v.boolean()) },
+  handler: async (ctx, args) => {
+    return readAutomations(ctx, args.enabledOnly, await isDemoModeEnabled(ctx));
   },
 });
 
 export const get = query({
   args: { automationId: v.string() },
   handler: async (ctx, args) => {
+    if (isDemoId(args.automationId)) return null;
+    return await ctx.db
+      .query("automations")
+      .withIndex("by_automation_id", (q) => q.eq("automationId", args.automationId))
+      .unique();
+  },
+});
+
+export const getForDashboard = query({
+  args: { automationId: v.string() },
+  handler: async (ctx, args) => {
+    if (isDemoId(args.automationId) !== (await isDemoModeEnabled(ctx))) return null;
     return await ctx.db
       .query("automations")
       .withIndex("by_automation_id", (q) => q.eq("automationId", args.automationId))
@@ -151,13 +175,37 @@ export const recentRuns = query({
   args: { automationId: v.optional(v.string()), limit: v.optional(v.number()) },
   handler: async (ctx, args) => {
     const limit = args.limit ?? 50;
+    if (args.automationId && isDemoId(args.automationId)) return [];
     if (args.automationId) {
-      return await ctx.db
+      return (await ctx.db
         .query("automationRuns")
         .withIndex("by_automation", (q) => q.eq("automationId", args.automationId!))
         .order("desc")
-        .take(limit);
+        .take(DEMO_SCAN_LIMIT))
+        .filter((run) => !isDemoAutomationRun(run))
+        .slice(0, limit);
     }
-    return await ctx.db.query("automationRuns").order("desc").take(limit);
+    const rows = await ctx.db
+      .query("automationRuns")
+      .order("desc")
+      .take(DEMO_SCAN_LIMIT);
+    return rows.filter((run) => !isDemoAutomationRun(run)).slice(0, limit);
+  },
+});
+
+export const recentRunsForDashboard = query({
+  args: { automationId: v.optional(v.string()), limit: v.optional(v.number()) },
+  handler: async (ctx, args) => {
+    const limit = args.limit ?? 50;
+    const demoOnly = await isDemoModeEnabled(ctx);
+    if (args.automationId && isDemoId(args.automationId) !== demoOnly) return [];
+    const rows = args.automationId
+      ? await ctx.db
+          .query("automationRuns")
+          .withIndex("by_automation", (q) => q.eq("automationId", args.automationId!))
+          .order("desc")
+          .take(DEMO_SCAN_LIMIT)
+      : await ctx.db.query("automationRuns").order("desc").take(DEMO_SCAN_LIMIT);
+    return rows.filter((run) => isDemoAutomationRun(run) === demoOnly).slice(0, limit);
   },
 });

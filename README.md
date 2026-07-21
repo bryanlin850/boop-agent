@@ -42,18 +42,19 @@ Built on:
 
 ## What you get
 
-- **iMessage in / iMessage out** via Sendblue (with typing indicators and webhook dedup).
+- **iMessage in / iMessage out** via Sendblue (with signed inbound requests, typing indicators, and webhook dedup).
 - **Sendblue CLI integration** — `npm run dev` auto-registers the inbound webhook for you every restart (no re-pasting into the dashboard when free ngrok rotates your URL).
 - **Dispatcher + workers** pattern: a lean interaction agent decides what to do, spawns focused sub-agents that actually do the work.
 - **Pure dispatcher** — the interaction agent has only memory + spawn + automation + draft tools. Web access, files, and integrations are explicitly denied to it; sub-agents get `WebSearch` / `WebFetch` / the integrations.
 - **Tiered memory** (short / long / permanent) with post-turn extraction, decay, and cleaning.
-- **Vector search** for recall when you add an embeddings key (Voyage or OpenAI) — falls back to substring.
+- **Vector search** for recall with a local BGE-large fallback, or optional Voyage/OpenAI embeddings.
 - **Memory consolidation** — a daily 3-phase adversarial pipeline (proposer → adversary → judge) that merges duplicates, resolves contradictions, and prunes noise. Uses the configured runtime, with provider-specific model defaults. Runs every 24h by default, also triggerable manually via `POST /consolidate`.
 - **Automations** — the agent can schedule recurring work from a text ("every morning at 8 summarize my calendar") and push results back to iMessage.
 - **Draft-and-send** — any external action stages a draft first; the agent only commits when the user confirms.
 - **Heartbeat + retry** — stuck agents auto-fail, debug dashboard can retry.
 - **Composio-powered integrations** — one API key unlocks 1000+ toolkits. Connect Gmail, Slack, GitHub, Linear, Notion, Drive, HubSpot, etc. with a click from the debug dashboard. Composio handles OAuth + token refresh.
 - **Optional local browser use** — when enabled in Settings, spawned agents can use a Patchright-backed Chrome profile for login-required services, visual workflows, or pages that reject ordinary automation.
+- **Optional local Apple data** — Mac-only, read-only iMessage, Apple Notes, and Apple Reminders connectors that stay off until you enable Apple data and connect each source in the debug dashboard.
 - **Debug dashboard** (React + Vite) with a Boop mascot — Dashboard (usage, known cost, tokens, agent status), Agents (timeline + integration logos), Automations, Memory (table + force-directed graph), Events, Connections.
 - **Convex** for persistence — real-time, typed, free tier.
 - **Uses your Claude Code or Codex/ChatGPT subscription** — choose during setup, with no separate provider API key required.
@@ -130,7 +131,7 @@ You need accounts for these. Keep the tabs open — setup will ask for credentia
 
 **Custom integrations welcome.** Composio covers the common catalog, but you're free to add your own MCP servers under `server/integrations/` and register them in `server/integrations/registry.ts` — the dispatcher treats them the same as Composio-backed ones (just named toolkits the execution agent can spawn against). Useful for in-house APIs, local tools, or anything Composio doesn't ship.
 
-**Local browser use is fully optional.** Boop can expose a local Chrome profile to spawned agents, but it is off by default. Enable it from the debug dashboard under **Settings → Local browser use** when you want browser automation for login-only services, visual workflows, or bot-wall-sensitive pages. The Patchright Chrome binary is installed only if you opt in during setup or click the install button in Settings.
+**Local browser use is fully optional.** Boop can expose a local Chrome/Chromium profile to spawned agents, but it is off by default. Enable it from the debug dashboard under **Settings → Local browser use** when you want browser automation for login-only services, visual workflows, or bot-wall-sensitive pages. The Patchright browser binary is installed only if you opt in during setup or click the install button in Settings.
 
 ---
 
@@ -168,11 +169,38 @@ Public URL:        https://<abc123>.ngrok.app
 Sendblue webhook:  https://<abc123>.ngrok.app/sendblue/webhook
 ```
 
-On free ngrok, **the webhook auto-registers with Sendblue every boot** — no manual paste needed. For stable URLs (ngrok reserved or Cloudflare Tunnel), set the webhook once in the dashboard.
+Boop synchronizes the signed Sendblue webhook on every boot, whether the public URL rotates or stays stable. No manual dashboard paste should be needed.
 
 Text your Sendblue-provisioned number from a **different** phone. The agent replies.
 
-> **⚠ ngrok free plan gives you a new URL every time.** That means every time you restart `npm run dev`, your Sendblue webhook URL is dead until you paste the new one in.
+### Native App
+
+<p align="center">
+  <img src="assets/boop-app-icon.png" alt="Boop desktop app icon" width="96" />
+</p>
+
+Boop also has an experimental dedicated desktop app for people who want to launch it from the Dock instead of keeping a terminal open. The app starts the same stack as `npm run dev`, embeds the debug dashboard when everything is ready, and gives you start, stop, restart, and server-status controls directly in the app. The dashboard's Connection header is where you can see the running server, Convex, dashboard, tunnel, Sendblue webhook registration, Convex URL, and the Sendblue number people should text.
+
+**Important:** `npm run setup` does not build or install the desktop app. It configures the checkout you are standing in: it creates or updates `.env.local`, walks through the runtime choice, configures Sendblue, creates or reuses the Convex deployment, generates Convex files, and offers optional local browser support. You still need to run setup at least once before Boop can run. If you want the installed app to run by itself, use `npm run desktop:setup`; that command runs the same interactive setup inside the app's runtime folder.
+
+```bash
+npm run desktop:setup  # recommended: setup app runtime, build app, optionally copy to /Applications
+npm run desktop:dev    # experimental: run the app from this checkout, after npm run setup
+npm run desktop:pack   # build an unsigned app bundle in dist/mac-arm64
+npm run desktop:dist   # build unsigned distributables
+```
+
+| Command | What happens | Installs the app? |
+|---|---|---|
+| `npm run setup` | Configures this checkout for terminal/dev use. Writes `.env.local`, configures Sendblue, sets up Convex, generates Convex files, and can install optional browser support. | No |
+| `npm run desktop:setup` | Prepares the app runtime folder, runs the same interactive setup there, builds the app, and on macOS offers to copy `Boop.app` to `/Applications`. | Yes, if you accept the `/Applications` prompt |
+| `npm run desktop:dev` | Experimental developer runner. Opens the desktop app from this checkout and uses this checkout's setup files. | No |
+| `npm run desktop:pack` | Creates an unsigned app bundle under `dist/` for local testing. | No, it only builds |
+| `npm run desktop:dist` | Creates unsigned distributable artifacts. | No, it only builds |
+
+The app keeps secrets and local state out of the app bundle. For an installed macOS app, `.env.local`, `.convex`, generated Convex files, and local data live under `~/Library/Application Support/Boop/runtime`. The app bundle contains the runnable project and the Boop app icon; the runtime folder contains the machine-specific setup. The optional local BGE-large embedding model is not bundled either: setup downloads about 1.3GB into the runtime's `data/` folder when you choose it. Only health checks and provider webhook routes are exposed through the public tunnel; dashboard, browser-control, and local configuration routes remain local to your Mac.
+
+> **ngrok's free plan gives you a new URL every time.** Boop automatically registers the new Sendblue webhook when `npm run dev` or the desktop app starts, so you should not need to paste it manually. If texts stop arriving, run `npm run sendblue:webhook:check` to compare Sendblue's registration with the active tunnel.
 >
 > If you're going to run this for more than a quick demo, **strongly recommend one of:**
 > - **ngrok paid plan** — gives you a reserved domain that stays the same forever
@@ -189,13 +217,14 @@ Text your Sendblue-provisioned number from a **different** phone. The agent repl
 
 ## How the Sendblue integration works
 
-Boop uses the [Sendblue CLI](https://github.com/sendblue-api/sendblue-cli) (`@sendblue/cli`) to eliminate almost all manual dashboard work. Three NPM scripts wrap it:
+Boop uses the [Sendblue CLI](https://github.com/sendblue-api/sendblue-cli) (`@sendblue/cli`) to eliminate almost all manual dashboard work. These NPM scripts wrap it:
 
 | Command | What it does |
 |---|---|
 | `npm run setup` | Interactive. Offers to run `sendblue login` / `sendblue setup` and pulls `api_key_id` + `api_secret_key` from `sendblue show-keys` into `.env.local`. |
 | `npm run sendblue:sync` | Runs `sendblue lines`, parses your provisioned phone number, and writes `SENDBLUE_FROM_NUMBER` to `.env.local` in E.164 format. Run this anytime your number changes or got set wrong. |
-| `npm run sendblue:webhook -- <url>` | Runs `sendblue webhooks list`, removes stale ngrok/tunnel hooks, and adds `<url>` as a `type=receive` inbound webhook. Called automatically by `npm run dev`. |
+| `npm run sendblue:webhook -- <url>` | Uses the Sendblue API to remove stale tunnel hooks, register `<url>` as a `type=receive` inbound webhook, and synchronize its signing secret. Called automatically by `npm run dev`. |
+| `npm run sendblue:webhook:check` | Read-only check. Compares the active ngrok tunnel (or `PUBLIC_URL`) and signing secret with the Sendblue receive webhook currently registered. Add `-- <url>` to check a specific URL. |
 
 ### The `npm run dev` lifecycle
 
@@ -211,17 +240,18 @@ Boop uses the [Sendblue CLI](https://github.com/sendblue-api/sendblue-cli) (`@se
        convex → "Convex functions ready"
        debug  → "Local:  http://localhost:5173/"
        ngrok  → tunnel URL visible at http://127.0.0.1:4040
- 4. Auto-register the webhook (FREE ngrok only, not reserved domains):
+ 4. Synchronize the signed webhook for the active public URL:
        webhook │ [webhook] removed stale https://old.ngrok-free.app/sendblue/webhook
        webhook │ [webhook] registered https://new.ngrok-free.app/sendblue/webhook (type=receive)
- 5. Show the banner with dashboard + public URL + your Sendblue number.
+ 5. The desktop app checks that Sendblue has the active webhook registered.
+ 6. Show the banner with dashboard + public URL + your Sendblue number.
 ```
 
 The banner will look like:
 
 ```
 ════════════════════════════════════════════════════════════════════
-  Boop is ready — ngrok tunnel is live  (webhook auto-registered).
+  Boop is ready — ngrok tunnel is live.
 
   🐶 Debug dashboard (click me):   http://localhost:5173
   🌐 Public URL:                   https://abc123.ngrok-free.app
@@ -235,9 +265,9 @@ The banner will look like:
 | Setup | Auto-register fires? | Why |
 |---|---|---|
 | Free ngrok (default) | **Yes**, every boot | URL rotates; dashboard would be stale otherwise |
-| Reserved `NGROK_DOMAIN` | No | URL is stable; configure once in Sendblue dashboard |
-| Static `PUBLIC_URL` (Cloudflare Tunnel etc.) | No | Same reason |
-| `SENDBLUE_AUTO_WEBHOOK=false` | No | Manual opt-out |
+| Reserved `NGROK_DOMAIN` | **Yes**, every boot | Keeps the signing secret synchronized without duplicating the stable URL |
+| Static `PUBLIC_URL` (Cloudflare Tunnel etc.) | **Yes**, every boot | Keeps the signing secret synchronized without duplicating the stable URL |
+| `SENDBLUE_AUTO_WEBHOOK=false` | No | Manual opt-out; run `npm run sendblue:webhook -- <url>` at least once to configure the required signing secret |
 
 ### What you'll see in the server logs during a conversation
 
@@ -266,6 +296,7 @@ The same events are written to Convex (`messages`, `executionAgents`, `agentLogs
 
 - **First time / after losing `.env.local`** → `npm run setup` (walks through Sendblue + Convex together)
 - **Phone number looks wrong in the banner** → `npm run sendblue:sync`
+- **Server says healthy but texts do not arrive** → `npm run sendblue:webhook:check`
 - **Webhook went stale in the dashboard and auto-register is off** → `npm run sendblue:webhook -- https://your-url.example.com/sendblue/webhook`
 
 ### Disabling auto-register
@@ -400,6 +431,8 @@ Everything lives in `.env.local` (auto-created by `npm run setup`). See `.env.ex
 | `BOOP_BROWSER_START_URL` | no | Optional URL to open when launching the local browser without an explicit URL. |
 | `BOOP_BROWSER_CHANNEL` / `BOOP_BROWSER_EXECUTABLE_PATH` | no | Chrome channel or explicit browser binary path for Patchright. Default channel `chrome`. |
 | `BOOP_BROWSER_EXTRA_ARGS` | no | Optional newline-separated Chrome flags. Only `--flag` lines are used. |
+| `BOOP_APPLE_ENABLED` | no | Fallback master switch for optional local Apple data. Default `false`. Once changed in the dashboard, the Convex `settings` row takes precedence over this env var. |
+| `BOOP_APPLE_MESSAGES_ENABLED` / `BOOP_APPLE_NOTES_ENABLED` / `BOOP_APPLE_REMINDERS_ENABLED` | no | Per-source fallbacks for local iMessage, Apple Notes, and Apple Reminders. Each defaults to `false`, so enabling one source does not implicitly enable the others. |
 | `BOOP_UPSTREAM_CHECK` | no | Set to `false` to disable the new-version banner on `npm run dev`. Default: on. |
 | `PORT` | no | Default `3456`. |
 | `PUBLIC_URL` | no | Base URL used in the Sendblue webhook. Composio handles its own OAuth callbacks on `platform.composio.dev`, so this is just for inbound iMessage. |
@@ -418,15 +451,47 @@ How it works:
 
 1. Open the debug dashboard → **Settings → Local browser use**.
 2. Turn on **Local browser use**. Until this is enabled, agents do not see the `browser` integration at all.
-3. Choose whether Chrome should be visible with **Show browser UI**. On means a Chrome window opens on your machine; off runs hidden/headless.
+3. Choose whether the browser should be visible with **Show browser UI**. On means a local browser window opens on your machine; off runs hidden/headless.
 4. Turn on **Spawn login instance** only when you want the agent to hand control to you for login or MFA. The agent will say: "I need you to log in first. I’ve spawned an instance on your machine."
-5. Use **Install Patchright Chrome** if Patchright has not installed its browser binary yet.
+5. Use **Install Patchright browser** if Patchright has not installed its browser binary yet.
 
-The browser uses a persistent Chrome profile, so cookies and login state can carry across runs. Boop does not store third-party service passwords or OAuth tokens for this feature; those live in the local Chrome profile you choose. The `browser_fill` tool redacts typed values before agent tool-use logs are stored. Settings are stored in Convex under the `settings` table, with `.env.local` values used only as fallbacks.
+The browser uses a persistent Chrome/Chromium profile, so cookies and login state can carry across runs. Boop does not store third-party service passwords or OAuth tokens for this feature; those live in the local browser profile you choose. The `browser_fill` tool redacts typed values before agent tool-use logs are stored. Settings are stored in Convex under the `settings` table, with `.env.local` values used only as fallbacks.
 
 Browser control HTTP routes are local-only. Requests forwarded through a public tunnel are rejected, so your ngrok/Sendblue URL cannot launch, close, or install a local browser.
 
 For Codex runtime, local browser tools are exposed internally under the `local_browser` namespace to avoid Codex's reserved browser namespace. The user-facing integration name remains `browser`.
+
+---
+
+## Local Apple data
+
+Local Apple data is optional, Mac-only, and read-only. It is designed for private single-user local runs where you want Boop to answer questions about data already on the Mac running the server.
+
+It is off by default in two layers:
+
+1. The master Apple data switch must be enabled.
+2. Each source must be connected separately: iMessage, Apple Notes, and Apple Reminders.
+
+Turn it on from the debug dashboard, either in the browser during local development or inside the desktop app:
+
+1. Start Boop locally with `npm run dev`, or open the Boop desktop app.
+2. Open `http://localhost:5173`, or use the embedded dashboard in the desktop app.
+3. Go to **Connections → Local Mac**.
+4. Click **Connect** only for the sources you want Boop to read.
+5. Use **Disconnect** to turn any source off again.
+
+You can also view the overall Apple status from **Settings → Apple data**. Dashboard changes are stored in Convex's `settings` table and override `.env.local` fallbacks. The env vars in `.env.example` are useful for first-run defaults, but they are not required.
+
+| Source | Permission | Notes |
+|---|---|---|
+| iMessage / SMS history | Full Disk Access for the app or process running Boop, such as Boop.app for desktop runs | Reads `~/Library/Messages/chat.db` locally through `/usr/bin/sqlite3`. |
+| Apple Notes | macOS Automation permission for Notes | Uses `/usr/bin/osascript` and exposes search/read tools only. |
+| Apple Reminders | macOS Automation permission for Reminders | Uses `/usr/bin/osascript` and exposes list tools only. |
+| Apple Calendar | Optional Apple bridge | Calendar events are not read by the local server path in this repo. |
+
+The control routes for local Apple data are localhost-only; public tunnel traffic cannot enable or disable local Apple access. Tool output is redacted before it reaches the agent/user: phone numbers and contact handles are hidden in Apple outputs, replies, and outgoing iMessage/log paths.
+
+On non-macOS machines, Local Mac connection cards are hidden or report unavailable. Composio integrations and the rest of Boop continue to work normally.
 
 ---
 
@@ -442,7 +507,7 @@ Boop outsources 3rd-party service integrations to [Composio](https://composio.de
    COMPOSIO_API_KEY=sk-comp-...
    ```
 3. `npm run dev`.
-4. Open the debug dashboard → **Connections** tab. You'll see a curated list of ~20 cards. For each one: click **Connect**, authenticate on Composio's hosted page, done — Composio ships managed OAuth for every curated toolkit. (If you add a custom toolkit that needs your own OAuth app, the card flips to a "Set up →" state pointing at `platform.composio.dev/auth-configs` — rare, but supported.)
+4. Open the debug dashboard → **Connections** tab. The connected and common integrations appear first, followed by the full Composio catalog with each toolkit's available tool count. Click **Connect**, authenticate on Composio's hosted page, and you are done. If a toolkit needs your own OAuth app, its row points to `platform.composio.dev/auth-configs` for the one-time setup.
 
 After a successful connect, the agent can use that toolkit immediately — no restart.
 
@@ -472,7 +537,7 @@ Key properties:
 - **Toolkit slug = integration name.** `spawn_agent(integrations: ["linear"])` works for any toolkit you've connected. Unknown slugs just log a warning and are skipped.
 - **No tokens on our side.** Every tool call runs through Composio's proxy. If Composio goes down, integrations go down — but your server never holds user OAuth tokens.
 - **Multi-account per toolkit.** Connect a second Gmail (work + personal) — each gets its own connection row you can alias. The dispatcher picks up all active connections for the slug.
-- **Identity resolution.** Connection cards show the real account email (e.g. `user@example.com`) resolved by calling the toolkit's own "who am I" tool through Composio (`GMAIL_GET_PROFILE`, etc.). Alias per connection if you want a friendlier label.
+- **Identity resolution.** Connection cards show the connected account identity resolved by calling the toolkit's own "who am I" tool through Composio (`GMAIL_GET_PROFILE`, etc.). Alias per connection if you want a friendlier label.
 
 ### Adding toolkits beyond the curated list
 
@@ -532,8 +597,14 @@ boop-agent/
 │   ├── composio.ts                # Composio SDK wrapper (session + toolkit scoping)
 │   ├── composio-routes.ts         # /composio/* HTTP routes for the Debug UI
 │   ├── browser-routes.ts          # /browser/* HTTP routes for Local browser use
+│   ├── apple-routes.ts            # /apple/* local-only routes for Local Mac data
 │   ├── broadcast.ts               # WS fanout
 │   ├── convex-client.ts           # Convex HTTP client
+│   ├── apple/
+│   │   ├── tools.ts               # Read-only Apple runtime/MCP tools
+│   │   ├── messages-local.ts      # Local iMessage SQLite reader
+│   │   ├── notes-local.ts         # Local Apple Notes osascript reader
+│   │   └── reminders-local.ts     # Local Apple Reminders osascript reader
 │   ├── browser/
 │   │   ├── launcher.ts            # Patchright Chrome launch/status/actions
 │   │   └── tools.ts               # Local browser runtime/MCP tools
@@ -645,7 +716,7 @@ Every release lists additions under [CHANGELOG.md](./CHANGELOG.md), with `[BREAK
 
 **Agent says Local browser use is off.**
 - Open the debug dashboard → **Settings → Local browser use** and turn it on. Agents cannot see or use the `browser` integration while it is disabled.
-- If launch fails, click **Install Patchright Chrome** in that same section, then try **Launch** again.
+- If launch fails, click **Install Patchright browser** in that same section, then try **Launch** again.
 - If you need to log in manually, also turn on **Spawn login instance** so the agent can open a visible handoff window.
 
 **I want to skip Sendblue for now.**

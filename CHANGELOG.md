@@ -8,14 +8,22 @@ Format:
 
 ---
 
+## Unreleased — Optional local Apple data
+
+- Added: optional Mac-only, read-only local Apple data connectors for iMessage/SMS history, Apple Notes, and Apple Reminders. The integration is off by default and requires both the master Apple data toggle and a per-source connect action before tools are exposed.
+- Added: Debug UI Local Mac connection cards for iMessage, Apple Notes, and Apple Reminders, plus Settings-panel Apple status and permission helpers for Full Disk Access and macOS Automation.
+- Added: local-only `/apple/*` control routes and Convex-backed Apple settings with `.env.local` fallbacks (`BOOP_APPLE_ENABLED`, `BOOP_APPLE_MESSAGES_ENABLED`, `BOOP_APPLE_NOTES_ENABLED`, `BOOP_APPLE_REMINDERS_ENABLED`).
+- Added: phone-number and contact-handle redaction for Apple tool output, agent replies, outgoing iMessage paths, and server log previews.
+
 ## Unreleased — Social Composio connectors
 
 - Added: Instagram and YouTube to the default Composio connector catalog.
 
 ## Unreleased — MMS image viewing + cross-runtime image spawning
 
-- Added: optional local browser use via a Patchright-backed persistent Chrome profile. It is off by default and agents do not see or use the `browser` integration until the user enables "Local browser use" in Settings. Once enabled, it is available as a fallback for login-only services, JS-heavy/visual workflows, and bot-wall-sensitive pages, with a manual login handoff tool that opens visible Chrome and tells the user: "I need you to log in first. I’ve spawned an instance on your machine."
-- Added: Debug UI local browser settings for the master enable toggle, Chrome visibility, login handoff, launch URL, profile directory, channel/executable path, extra flags, install, launch, spawn-login, close, and status. Patchright is an optional dependency, and the Patchright Chrome browser binary is installed only when the user opts in during setup or clicks the install control.
+- Added: optional local browser use via a Patchright-backed persistent Chrome/Chromium profile. It is off by default and agents do not see or use the `browser` integration until the user enables "Local browser use" in Settings. Once enabled, it is available as a fallback for login-only services, JS-heavy/visual workflows, and bot-wall-sensitive pages, with a manual login handoff tool that opens a visible browser and tells the user: "I need you to log in first. I’ve spawned an instance on your machine."
+- Added: Debug UI local browser settings for the master enable toggle, browser visibility, login handoff, launch URL, profile directory, channel/executable path, extra flags, install, launch, spawn-login, close, and status. Patchright is an optional dependency, and the Patchright browser binary is installed only when the user opts in during setup or clicks the install control.
+- Added: Debug UI local browser status now surfaces an "Install needed" state with an install CTA when no compatible Chrome/Chromium binary is detected.
 - Fixed: Codex runtime local browser tools now use the internal `local_browser` namespace so they do not collide with reserved Responses API browser namespaces. The Debug UI and spawned-agent integration still present this as "browser" / "Local browser use".
 - Fixed: local browser controls are local-only HTTP routes, `browser_fill` redacts typed text before agent-log persistence, explicit-browser routing now requires strong local-browser intent, and the manual launch URL can be cleared to open `about:blank`.
 - Added: inbound Sendblue MMS images are downloaded, MIME/size validated, uploaded to Convex storage, and passed as image blocks to the dispatcher. Direct image Q&A was validated on both Codex (`gpt-5.4-mini`) and Claude (`claude-opus-4-7`) with persisted `imageStorageIds` and no `mediaError`.

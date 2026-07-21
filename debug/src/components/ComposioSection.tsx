@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useQuery } from "convex/react";
+import { api } from "../../../convex/_generated/api.js";
 import { IntegrationLogo } from "../lib/branding.js";
 
 type AuthMode = "managed" | "byo";
@@ -29,6 +31,34 @@ interface ToolkitsResponse {
   enabled: boolean;
   toolkits: Toolkit[];
 }
+
+type ApplePermissionState = "granted" | "denied" | "notDetermined";
+
+interface ApplePermissions {
+  messages?: ApplePermissionState;
+  calendars?: ApplePermissionState;
+  reminders?: ApplePermissionState;
+  notes?: ApplePermissionState;
+}
+
+interface AppleBridgeStatus {
+  running: boolean;
+  source: "desktop-bridge" | "local-server" | "unavailable";
+  port: number | null;
+  version: string | null;
+  permissions: ApplePermissions | null;
+  error: string | null;
+}
+
+interface AppleStatus {
+  enabled: boolean;
+  messagesEnabled: boolean;
+  notesEnabled: boolean;
+  remindersEnabled: boolean;
+  bridge: AppleBridgeStatus;
+}
+
+type AppleLocalSource = "messages" | "notes" | "reminders";
 
 interface ToolSummary {
   slug: string;
@@ -106,6 +136,280 @@ const COMPOSIO_DASHBOARD_URL = "https://dashboard.composio.dev";
 
 const INTRO_DISMISSED_KEY = "boop:connections:intro-dismissed";
 const TOAST_TIMEOUT_MS = 6000;
+
+const DEMO_CREATED_AT = "2026-07-09T14:30:00.000Z";
+
+const DEMO_TOOLS_BY_SLUG: Record<string, ToolSummary[]> = {
+  gmail: [
+    {
+      slug: "GMAIL_SEARCH_EMAILS",
+      name: "Search emails",
+      description: "Search recent mail by sender, label, text, or date window.",
+    },
+    {
+      slug: "GMAIL_FETCH_EMAIL",
+      name: "Fetch email",
+      description: "Read the full message and thread context for a selected email.",
+    },
+    {
+      slug: "GMAIL_CREATE_EMAIL_DRAFT",
+      name: "Create draft",
+      description: "Prepare a reply and leave it pending for approval.",
+    },
+    {
+      slug: "GMAIL_LIST_DRAFTS",
+      name: "List drafts",
+      description: "Review pending drafts before anything is sent.",
+    },
+  ],
+  googlecalendar: [
+    {
+      slug: "GOOGLECALENDAR_LIST_EVENTS",
+      name: "List events",
+      description: "Find meetings, holds, conflicts, and free windows.",
+    },
+    {
+      slug: "GOOGLECALENDAR_CREATE_EVENT",
+      name: "Create event",
+      description: "Create a calendar hold with location, dial-in, and notes.",
+    },
+    {
+      slug: "GOOGLECALENDAR_UPDATE_EVENT",
+      name: "Update event",
+      description: "Move, rename, or annotate an existing calendar event.",
+    },
+  ],
+  slack: [
+    {
+      slug: "SLACK_SEARCH_MESSAGES",
+      name: "Search messages",
+      description: "Find source messages across launch, support, and feedback channels.",
+    },
+    {
+      slug: "SLACK_FETCH_CONVERSATION",
+      name: "Fetch conversation",
+      description: "Load surrounding thread context before summarizing.",
+    },
+    {
+      slug: "SLACK_SEND_MESSAGE",
+      name: "Send message",
+      description: "Post a prepared update after explicit approval.",
+    },
+  ],
+  linear: [
+    {
+      slug: "LINEAR_SEARCH_ISSUES",
+      name: "Search issues",
+      description: "Find launch blockers, owners, statuses, and labels.",
+    },
+    {
+      slug: "LINEAR_CREATE_ISSUE",
+      name: "Create issue",
+      description: "File a bug or follow-up with source context attached.",
+    },
+    {
+      slug: "LINEAR_UPDATE_ISSUE",
+      name: "Update issue",
+      description: "Patch status, owner, priority, and comments.",
+    },
+  ],
+  notion: [
+    {
+      slug: "NOTION_SEARCH",
+      name: "Search pages",
+      description: "Find launch notes, briefs, customer docs, and decision logs.",
+    },
+    {
+      slug: "NOTION_FETCH_PAGE",
+      name: "Fetch page",
+      description: "Read a page before citing or updating it.",
+    },
+    {
+      slug: "NOTION_CREATE_PAGE",
+      name: "Create page",
+      description: "Create a structured brief, digest, or handoff note.",
+    },
+  ],
+  github: [
+    {
+      slug: "GITHUB_SEARCH_CODE",
+      name: "Search code",
+      description: "Find implementation references and risky changes.",
+    },
+    {
+      slug: "GITHUB_LIST_PULL_REQUESTS",
+      name: "List pull requests",
+      description: "Review open branches, checks, and pending feedback.",
+    },
+    {
+      slug: "GITHUB_CREATE_ISSUE",
+      name: "Create issue",
+      description: "Capture a bug with reproduction notes and owner.",
+    },
+  ],
+  googledrive: [
+    {
+      slug: "GOOGLEDRIVE_SEARCH",
+      name: "Search Drive",
+      description: "Find source docs, spreadsheets, receipts, and planning files.",
+    },
+    {
+      slug: "GOOGLEDRIVE_FETCH_FILE",
+      name: "Fetch file",
+      description: "Read a selected document before summarizing or linking it.",
+    },
+  ],
+};
+
+function demoConnection(
+  slug: string,
+  alias: string,
+  label = alias,
+): Connection {
+  return {
+    id: `demo_${slug}_${alias.toLowerCase().replace(/[^a-z0-9]+/g, "_")}`,
+    status: "ACTIVE",
+    alias,
+    accountLabel: label,
+    accountEmail: null,
+    accountName: label,
+    accountAvatarUrl: null,
+    createdAt: DEMO_CREATED_AT,
+  };
+}
+
+const DEMO_TOOLKITS_RESPONSE: ToolkitsResponse = {
+  enabled: true,
+  toolkits: [
+    {
+      slug: "gmail",
+      displayName: "Gmail",
+      authMode: "managed",
+      hasAuthConfig: true,
+      logoUrl: null,
+      description: "Priority inbox search, thread reading, and approval-based draft creation.",
+      toolCount: DEMO_TOOLS_BY_SLUG.gmail.length,
+      connections: [demoConnection("gmail", "Primary inbox"), demoConnection("gmail", "Support inbox")],
+    },
+    {
+      slug: "googlecalendar",
+      displayName: "Google Calendar",
+      authMode: "managed",
+      hasAuthConfig: true,
+      logoUrl: null,
+      description: "Calendar reads, conflict checks, tentative holds, and meeting updates.",
+      toolCount: DEMO_TOOLS_BY_SLUG.googlecalendar.length,
+      connections: [demoConnection("googlecalendar", "Work calendar")],
+    },
+    {
+      slug: "linear",
+      displayName: "Linear",
+      authMode: "managed",
+      hasAuthConfig: true,
+      logoUrl: null,
+      description: "Issue search, blocker sweeps, bug filing, and status updates.",
+      toolCount: DEMO_TOOLS_BY_SLUG.linear.length,
+      connections: [demoConnection("linear", "Product workspace")],
+    },
+    {
+      slug: "slack",
+      displayName: "Slack",
+      authMode: "managed",
+      hasAuthConfig: true,
+      logoUrl: null,
+      description: "Source-message search and thread context for support and launch channels.",
+      toolCount: DEMO_TOOLS_BY_SLUG.slack.length,
+      connections: [demoConnection("slack", "Team workspace")],
+    },
+    {
+      slug: "notion",
+      displayName: "Notion",
+      authMode: "managed",
+      hasAuthConfig: true,
+      logoUrl: null,
+      description: "Search and write structured briefs, checklists, and decision logs.",
+      toolCount: DEMO_TOOLS_BY_SLUG.notion.length,
+      connections: [demoConnection("notion", "Launch workspace")],
+    },
+    {
+      slug: "github",
+      displayName: "GitHub",
+      authMode: "managed",
+      hasAuthConfig: true,
+      logoUrl: null,
+      description: "Code search, pull request checks, and issue creation for engineering follow-up.",
+      toolCount: DEMO_TOOLS_BY_SLUG.github.length,
+      connections: [demoConnection("github", "Engineering org")],
+    },
+    {
+      slug: "googledrive",
+      displayName: "Google Drive",
+      authMode: "managed",
+      hasAuthConfig: true,
+      logoUrl: null,
+      description: "Planning docs, sheets, receipts, and launch artifacts.",
+      toolCount: DEMO_TOOLS_BY_SLUG.googledrive.length,
+      connections: [demoConnection("googledrive", "Shared Drive")],
+    },
+  ],
+};
+
+const DEMO_CONNECTED_TOOLKITS_BY_SLUG = new Map(
+  DEMO_TOOLKITS_RESPONSE.toolkits.map((toolkit) => [toolkit.slug, toolkit]),
+);
+
+function buildDemoToolkitsResponse(catalog: ToolkitsResponse | null): ToolkitsResponse {
+  if (!catalog || catalog.toolkits.length === 0) return DEMO_TOOLKITS_RESPONSE;
+
+  const bySlug = new Map<string, Toolkit>();
+  for (const toolkit of catalog.toolkits) {
+    const demoToolkit = DEMO_CONNECTED_TOOLKITS_BY_SLUG.get(toolkit.slug);
+    bySlug.set(toolkit.slug, {
+      ...toolkit,
+      authMode: "managed",
+      hasAuthConfig: true,
+      connections: demoToolkit?.connections ?? [],
+      toolCount: toolkit.toolCount ?? demoToolkit?.toolCount ?? null,
+    });
+  }
+
+  for (const toolkit of DEMO_TOOLKITS_RESPONSE.toolkits) {
+    if (!bySlug.has(toolkit.slug)) bySlug.set(toolkit.slug, toolkit);
+  }
+
+  return {
+    enabled: true,
+    toolkits: [...bySlug.values()].sort((a, b) => {
+      const aConnected = hasActive(a);
+      const bConnected = hasActive(b);
+      if (aConnected !== bConnected) return aConnected ? -1 : 1;
+      return a.displayName.localeCompare(b.displayName);
+    }),
+  };
+}
+
+const DEMO_APPLE_STATUS: AppleStatus = {
+  enabled: true,
+  messagesEnabled: true,
+  notesEnabled: true,
+  remindersEnabled: true,
+  bridge: {
+    running: true,
+    source: "desktop-bridge",
+    port: 45731,
+    version: "demo",
+    permissions: {
+      messages: "granted",
+      notes: "granted",
+      reminders: "granted",
+    },
+    error: null,
+  },
+};
+
+const DEMO_EXPANDED_TOOLKITS = Object.fromEntries(
+  DEMO_TOOLKITS_RESPONSE.toolkits.map((toolkit) => [toolkit.slug, true]),
+);
 
 interface ToastState {
   id: number;
@@ -202,8 +506,12 @@ function IntroCard({ isDark, onDismiss }: { isDark: boolean; onDismiss: () => vo
 }
 
 export function ComposioSection({ isDark }: { isDark: boolean }) {
+  const demoStatus = useQuery(api.demo.status);
+  const demoModeEnabled = demoStatus?.enabled ?? false;
   const [data, setData] = useState<ToolkitsResponse | null>(null);
   const [loaded, setLoaded] = useState(false);
+  const [appleStatus, setAppleStatus] = useState<AppleStatus | null>(null);
+  const [appleLoaded, setAppleLoaded] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [needsAuthConfig, setNeedsAuthConfig] = useState<NeedsAuthConfigInfo | null>(null);
   const [showIntro, setShowIntro] = useState(() => {
@@ -256,8 +564,12 @@ export function ComposioSection({ isDark }: { isDark: boolean }) {
   );
 
   const fetchToolkits = useCallback(async () => {
+    setLoaded(false);
     try {
-      const r = await fetch("/api/composio/toolkits");
+      const endpoint = demoModeEnabled
+        ? "/api/composio/toolkits?catalog=all"
+        : "/api/composio/toolkits";
+      const r = await fetch(endpoint);
       const json = (await r.json()) as ToolkitsResponse;
       setData(json);
     } catch {
@@ -265,11 +577,137 @@ export function ComposioSection({ isDark }: { isDark: boolean }) {
     } finally {
       setLoaded(true);
     }
+  }, [demoModeEnabled]);
+
+  const fetchAppleStatus = useCallback(async () => {
+    try {
+      const r = await fetch("/api/apple/status");
+      if (!r.ok) throw new Error(r.statusText);
+      setAppleStatus((await r.json()) as AppleStatus);
+    } catch (err) {
+      setAppleStatus({
+        enabled: false,
+        messagesEnabled: false,
+        notesEnabled: false,
+        remindersEnabled: false,
+        bridge: {
+          running: false,
+          source: "unavailable",
+          port: null,
+          version: null,
+          permissions: null,
+          error: err instanceof Error ? err.message : String(err),
+        },
+      });
+    } finally {
+      setAppleLoaded(true);
+    }
   }, []);
 
   useEffect(() => {
     fetchToolkits();
   }, [fetchToolkits]);
+
+  useEffect(() => {
+    fetchAppleStatus();
+  }, [fetchAppleStatus]);
+
+  const toggleAppleSource = useCallback(
+    async (source: AppleLocalSource, enabled: boolean) => {
+      setBusy(`apple:${source}`);
+      const label =
+        source === "messages"
+          ? "iMessage"
+          : source === "notes"
+            ? "Apple Notes"
+            : "Apple Reminders";
+      try {
+        const r = await fetch(`/api/apple/${source}/${enabled ? "enable" : "disable"}`, {
+          method: "POST",
+        });
+        if (!r.ok) {
+          const err = await r.json().catch(() => ({}));
+          showToast(`${label} connection failed: ${err?.error ?? r.statusText}`);
+          return;
+        }
+        setAppleStatus((await r.json()) as AppleStatus);
+      } catch (err) {
+        showToast(`${label} connection failed: ${String(err)}`);
+      } finally {
+        setBusy(null);
+      }
+    },
+    [showToast],
+  );
+
+  const requestNotesAccess = useCallback(async () => {
+    setBusy("apple:notes");
+    try {
+      const r = await fetch("/api/apple/request-notes-access", { method: "POST" });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        showToast(`Apple Notes access failed: ${err?.error ?? r.statusText}`);
+        return;
+      }
+      setAppleStatus((await r.json()) as AppleStatus);
+    } catch (err) {
+      showToast(`Apple Notes access failed: ${String(err)}`);
+    } finally {
+      setBusy(null);
+    }
+  }, [showToast]);
+
+  const requestRemindersAccess = useCallback(async () => {
+    setBusy("apple:reminders");
+    try {
+      const r = await fetch("/api/apple/request-reminders-access", { method: "POST" });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        showToast(`Apple Reminders access failed: ${err?.error ?? r.statusText}`);
+        return;
+      }
+      setAppleStatus((await r.json()) as AppleStatus);
+    } catch (err) {
+      showToast(`Apple Reminders access failed: ${String(err)}`);
+    } finally {
+      setBusy(null);
+    }
+  }, [showToast]);
+
+  const openFullDiskAccess = useCallback(async () => {
+    setBusy("apple:messages");
+    try {
+      const r = await fetch("/api/apple/open-full-disk-access", { method: "POST" });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        showToast(`Could not open Full Disk Access settings: ${err?.error ?? r.statusText}`);
+        return;
+      }
+      showToast("Opened Full Disk Access settings. Add Boop, then restart Boop from the Connection header.", "info");
+    } catch (err) {
+      showToast(`Could not open Full Disk Access settings: ${String(err)}`);
+    } finally {
+      setBusy(null);
+    }
+  }, [showToast]);
+
+  const openAutomationSettings = useCallback(async (source: "notes" | "reminders" = "notes") => {
+    const label = source === "notes" ? "Notes" : "Reminders";
+    setBusy(`apple:${source}`);
+    try {
+      const r = await fetch("/api/apple/open-automation-settings", { method: "POST" });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        showToast(`Could not open Automation settings: ${err?.error ?? r.statusText}`);
+        return;
+      }
+      showToast(`Opened Automation settings. Enable ${label} for Boop.`, "info");
+    } catch (err) {
+      showToast(`Could not open Automation settings: ${String(err)}`);
+    } finally {
+      setBusy(null);
+    }
+  }, [showToast]);
 
   const connect = useCallback(
     async (slug: string) => {
@@ -402,20 +840,115 @@ export function ComposioSection({ isDark }: { isDark: boolean }) {
     ? "border-white/10 bg-[#202024] shadow-black/20"
     : "border-zinc-200 bg-white shadow-zinc-200/50";
   const muted = isDark ? "text-zinc-500" : "text-zinc-400";
+  const visibleData = demoModeEnabled ? buildDemoToolkitsResponse(data) : data;
+  const visibleLoaded = loaded;
+  const visibleAppleStatus = demoModeEnabled ? DEMO_APPLE_STATUS : appleStatus;
+  const visibleAppleLoaded = demoModeEnabled ? true : appleLoaded;
+  const visibleExpanded = demoModeEnabled ? DEMO_EXPANDED_TOOLKITS : expanded;
+  const visibleToolsBySlug = demoModeEnabled
+    ? { ...DEMO_TOOLS_BY_SLUG, ...toolsBySlug }
+    : toolsBySlug;
+  const handleConnect = demoModeEnabled
+    ? (slug: string) => showToast(`${slug} is already connected in demo mode.`, "info")
+    : connect;
+  const handleDisconnect = demoModeEnabled
+    ? (_slug: string, _connectionId: string) =>
+        showToast("Demo connections are read-only. Turn off demo mode to manage real accounts.", "info")
+    : disconnect;
+  const handleRename = demoModeEnabled
+    ? async () => {
+        showToast("Demo account labels are fixed for the recording dataset.", "info");
+        return false;
+      }
+    : rename;
 
   const activeCount =
-    data?.toolkits.reduce((n, t) => n + t.connections.filter((c) => c.status === "ACTIVE").length, 0) ?? 0;
+    visibleData?.toolkits.reduce((n, t) => n + t.connections.filter((c) => c.status === "ACTIVE").length, 0) ?? 0;
+  const imessageConnected =
+    Boolean(visibleAppleStatus?.messagesEnabled) &&
+    Boolean(visibleAppleStatus?.bridge.running) &&
+    visibleAppleStatus?.bridge.permissions?.messages === "granted";
+  const notesConnected =
+    Boolean(visibleAppleStatus?.notesEnabled) &&
+    Boolean(visibleAppleStatus?.bridge.running) &&
+    visibleAppleStatus?.bridge.permissions?.notes === "granted";
+  const remindersConnected =
+    Boolean(visibleAppleStatus?.remindersEnabled) &&
+    Boolean(visibleAppleStatus?.bridge.running) &&
+    visibleAppleStatus?.bridge.permissions?.reminders === "granted";
+  const showLocalAppleConnectors =
+    visibleAppleLoaded &&
+    (visibleAppleStatus?.bridge.source === "local-server" ||
+      visibleAppleStatus?.bridge.source === "desktop-bridge");
 
   return (
     <section className="mx-auto max-w-[1040px] space-y-5 pb-10">
       <SectionHeader
         title="Connections"
-        count={activeCount}
+        count={
+          activeCount +
+          (imessageConnected ? 1 : 0) +
+          (notesConnected ? 1 : 0) +
+          (remindersConnected ? 1 : 0)
+        }
         isDark={isDark}
-        hint={data?.enabled === false ? "Set COMPOSIO_API_KEY in .env.local" : undefined}
+        hint={
+          !demoModeEnabled && visibleData?.enabled === false
+            ? "Set COMPOSIO_API_KEY in .env.local"
+            : undefined
+        }
       />
 
-      {showIntro && data?.enabled !== false && <IntroCard isDark={isDark} onDismiss={dismissIntro} />}
+      {showIntro && !demoModeEnabled && visibleData?.enabled !== false && (
+        <IntroCard isDark={isDark} onDismiss={dismissIntro} />
+      )}
+
+      {showLocalAppleConnectors && (
+        <SubsectionGrid
+          label="Local Mac"
+          hint="Read-only, private to this computer"
+          isDark={isDark}
+        >
+          <IMessageConnectionCard
+            status={visibleAppleStatus}
+            loaded={visibleAppleLoaded}
+            busy={busy === "apple:messages"}
+            cardBg={cardBg}
+            muted={muted}
+            isDark={isDark}
+            demoMode={demoModeEnabled}
+            onToggle={(enabled) => toggleAppleSource("messages", enabled)}
+            onRefresh={fetchAppleStatus}
+            onOpenFullDiskAccess={openFullDiskAccess}
+          />
+          <AppleNotesConnectionCard
+            status={visibleAppleStatus}
+            loaded={visibleAppleLoaded}
+            busy={busy === "apple:notes"}
+            cardBg={cardBg}
+            muted={muted}
+            isDark={isDark}
+            demoMode={demoModeEnabled}
+            onToggle={(enabled) => toggleAppleSource("notes", enabled)}
+            onRefresh={fetchAppleStatus}
+            onRequestNotesAccess={requestNotesAccess}
+            onOpenAutomationSettings={() => openAutomationSettings("notes")}
+          />
+          <AppleRemindersConnectionCard
+            status={visibleAppleStatus}
+            loaded={visibleAppleLoaded}
+            busy={busy === "apple:reminders"}
+            cardBg={cardBg}
+            muted={muted}
+            isDark={isDark}
+            demoMode={demoModeEnabled}
+            onToggle={(enabled) => toggleAppleSource("reminders", enabled)}
+            onRefresh={fetchAppleStatus}
+            onRequestRemindersAccess={requestRemindersAccess}
+            onOpenAutomationSettings={() => openAutomationSettings("reminders")}
+          />
+        </SubsectionGrid>
+      )}
 
       {needsAuthConfig && (
         <div
@@ -453,12 +986,12 @@ export function ComposioSection({ isDark }: { isDark: boolean }) {
         </div>
       )}
 
-      {data?.enabled === false ? (
+      {visibleData?.enabled === false ? (
         <div className={`rounded-2xl border px-4 py-6 text-sm shadow-sm ${cardBg} ${muted}`}>
           Add <code>COMPOSIO_API_KEY</code> to <code>.env.local</code> and restart the server to
           connect integrations like Gmail, Slack, GitHub, Linear, Notion, and more. Get a key at{" "}
           <a
-            href="https://app.composio.dev/developers?utm_source=chris&utm_medium=youtube&utm_campaign=collab"
+            href="https://app.composio.dev/developers"
             target="_blank"
             rel="noreferrer"
             className={isDark ? "text-zinc-200 underline" : "text-zinc-700 underline"}
@@ -467,7 +1000,7 @@ export function ComposioSection({ isDark }: { isDark: boolean }) {
           </a>
           .
         </div>
-      ) : !loaded ? (
+      ) : !visibleLoaded ? (
         <div className="grid gap-3">
           {[1, 2, 3, 4].map((i) => (
             <div key={i} className={`h-20 rounded-2xl border shadow-sm ${cardBg} shimmer`} />
@@ -475,7 +1008,7 @@ export function ComposioSection({ isDark }: { isDark: boolean }) {
         </div>
       ) : (
         (() => {
-          const toolkits = data?.toolkits ?? [];
+          const toolkits = visibleData?.toolkits ?? [];
           const needsSetup = toolkits.filter(
             (t) => !hasActive(t) && t.authMode === "byo" && !t.hasAuthConfig,
           );
@@ -484,8 +1017,8 @@ export function ComposioSection({ isDark }: { isDark: boolean }) {
             <div className="space-y-6">
               {ready.length > 0 && (
                 <SubsectionGrid
-                  label="Ready to connect"
-                  hint="Composio-managed OAuth, click Connect"
+                  label={demoModeEnabled ? "Composio catalog" : "Ready to connect"}
+                  hint={demoModeEnabled ? "Full Composio catalog; demo connects a few accounts" : "Composio-managed OAuth, click Connect"}
                   isDark={isDark}
                 >
                   {ready.map((t) => (
@@ -496,11 +1029,12 @@ export function ComposioSection({ isDark }: { isDark: boolean }) {
                       cardBg={cardBg}
                       muted={muted}
                       isDark={isDark}
-                      expanded={!!expanded[t.slug]}
-                      tools={toolsBySlug[t.slug]}
-                      onConnect={connect}
-                      onDisconnect={disconnect}
-                      onRename={rename}
+                      demoMode={demoModeEnabled}
+                      expanded={!!visibleExpanded[t.slug]}
+                      tools={visibleToolsBySlug[t.slug]}
+                      onConnect={handleConnect}
+                      onDisconnect={handleDisconnect}
+                      onRename={handleRename}
                       onToggleTools={toggleTools}
                     />
                   ))}
@@ -520,11 +1054,12 @@ export function ComposioSection({ isDark }: { isDark: boolean }) {
                       cardBg={cardBg}
                       muted={muted}
                       isDark={isDark}
-                      expanded={!!expanded[t.slug]}
-                      tools={toolsBySlug[t.slug]}
-                      onConnect={connect}
-                      onDisconnect={disconnect}
-                      onRename={rename}
+                      demoMode={demoModeEnabled}
+                      expanded={!!visibleExpanded[t.slug]}
+                      tools={visibleToolsBySlug[t.slug]}
+                      onConnect={handleConnect}
+                      onDisconnect={handleDisconnect}
+                      onRename={handleRename}
                       onToggleTools={toggleTools}
                     />
                   ))}
@@ -539,12 +1074,559 @@ export function ComposioSection({ isDark }: { isDark: boolean }) {
   );
 }
 
+function IMessageConnectionCard({
+  status,
+  loaded,
+  busy,
+  cardBg,
+  muted,
+  isDark,
+  demoMode,
+  onToggle,
+  onRefresh,
+  onOpenFullDiskAccess,
+}: {
+  status: AppleStatus | null;
+  loaded: boolean;
+  busy: boolean;
+  cardBg: string;
+  muted: string;
+  isDark: boolean;
+  demoMode?: boolean;
+  onToggle: (enabled: boolean) => void;
+  onRefresh: () => void;
+  onOpenFullDiskAccess: () => void;
+}) {
+  const enabled = status?.messagesEnabled ?? false;
+  const bridge = status?.bridge ?? null;
+  const permission = bridge?.permissions?.messages;
+  const state = imessageConnectionState(status, loaded);
+  const buttonLabel = busy ? "Working..." : enabled ? "Disconnect" : "Connect";
+
+  return (
+    <div className={`rounded-2xl border px-4 py-3.5 shadow-sm fade-in ${cardBg}`}>
+      <div className="flex items-center gap-4">
+        <IntegrationLogo raw="imessage" size={32} />
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className={`text-sm font-medium ${isDark ? "text-zinc-100" : "text-zinc-900"}`}>
+              iMessage
+            </span>
+            <span
+              className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${
+                isDark ? "bg-emerald-400/10 text-emerald-300" : "bg-emerald-50 text-emerald-700"
+              }`}
+            >
+              Read-only
+            </span>
+          </div>
+          <p className={`text-xs ${muted} leading-snug mt-0.5 line-clamp-2`}>
+            Reads local Messages history from this Mac. Boop needs Full Disk Access.
+          </p>
+          <div className="mt-1.5 flex flex-wrap items-center gap-2">
+            <span className={`inline-flex items-center gap-1.5 text-xs ${state.textClass}`}>
+              <span className={`w-1.5 h-1.5 rounded-full ${state.dotClass}`} />
+              {state.label}
+            </span>
+            {permission && permission !== "granted" && (
+              <span className={`text-[10px] mono ${muted}`}>messages={permission}</span>
+            )}
+          </div>
+        </div>
+        {demoMode ? (
+          <DemoReadyPill isDark={isDark} />
+        ) : (
+          <div className="flex shrink-0 items-center gap-2">
+            <button
+              onClick={onRefresh}
+              disabled={busy}
+              className={`rounded-xl border px-2.5 py-1.5 text-xs transition-colors ${
+                isDark
+                  ? "border-white/10 text-zinc-300 hover:bg-white/5"
+                  : "border-zinc-200 text-zinc-600 hover:bg-zinc-100"
+              } disabled:opacity-50`}
+            >
+              Refresh
+            </button>
+            <button
+              onClick={() => onToggle(!enabled)}
+              disabled={busy || !loaded}
+              className={`rounded-xl px-3 py-1.5 text-xs font-medium transition-colors ${
+                busy || !loaded
+                  ? isDark
+                    ? "bg-zinc-700 text-zinc-400"
+                    : "bg-zinc-200 text-zinc-500"
+                  : enabled
+                    ? isDark
+                      ? "border border-white/10 text-zinc-300 hover:bg-white/5"
+                      : "border border-zinc-200 text-zinc-600 hover:bg-zinc-100"
+                    : isDark
+                      ? "bg-zinc-100 text-zinc-950 hover:bg-white"
+                      : "bg-zinc-950 text-white hover:bg-zinc-800"
+              }`}
+            >
+              {buttonLabel}
+            </button>
+          </div>
+        )}
+      </div>
+
+      {enabled && !bridge?.running && (
+        <div
+          className={`mt-3 rounded-xl border px-3 py-2 text-xs leading-relaxed ${
+            isDark
+              ? "border-amber-500/20 bg-amber-500/5 text-amber-200"
+              : "border-amber-200 bg-amber-50 text-amber-800"
+          }`}
+        >
+          iMessage reads only work on macOS. Run Boop on the Mac whose Messages you want to read.
+          {bridge?.error && <span className="block mt-1 mono text-[11px] opacity-80">{bridge.error}</span>}
+        </div>
+      )}
+
+      {enabled && bridge?.running && permission === "denied" && (
+        <div
+          className={`mt-3 rounded-xl border px-3 py-2 text-xs leading-relaxed ${
+            isDark
+              ? "border-rose-500/20 bg-rose-500/5 text-rose-200"
+              : "border-rose-200 bg-rose-50 text-rose-700"
+          }`}
+        >
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <span>
+              Grant Full Disk Access to Boop, then restart Boop from the Connection header.
+            </span>
+            <button
+              type="button"
+              onClick={onOpenFullDiskAccess}
+              disabled={busy}
+              className={`shrink-0 rounded-xl px-2.5 py-1.5 text-xs font-medium transition-colors ${
+                isDark
+                  ? "bg-rose-400/15 text-rose-100 hover:bg-rose-400/20 disabled:opacity-50"
+                  : "bg-rose-100 text-rose-800 hover:bg-rose-200 disabled:opacity-50"
+              }`}
+            >
+              Open Full Disk Access
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AppleNotesConnectionCard({
+  status,
+  loaded,
+  busy,
+  cardBg,
+  muted,
+  isDark,
+  demoMode,
+  onToggle,
+  onRefresh,
+  onRequestNotesAccess,
+  onOpenAutomationSettings,
+}: {
+  status: AppleStatus | null;
+  loaded: boolean;
+  busy: boolean;
+  cardBg: string;
+  muted: string;
+  isDark: boolean;
+  demoMode?: boolean;
+  onToggle: (enabled: boolean) => void;
+  onRefresh: () => void;
+  onRequestNotesAccess: () => void;
+  onOpenAutomationSettings: () => void;
+}) {
+  const enabled = status?.notesEnabled ?? false;
+  const bridge = status?.bridge ?? null;
+  const permission = bridge?.permissions?.notes;
+  const state = appleNotesConnectionState(status, loaded);
+  const buttonLabel = busy ? "Working..." : enabled ? "Disconnect" : "Connect";
+
+  return (
+    <div className={`rounded-2xl border px-4 py-3.5 shadow-sm fade-in ${cardBg}`}>
+      <div className="flex items-center gap-4">
+        <IntegrationLogo raw="apple-notes" size={32} />
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className={`text-sm font-medium ${isDark ? "text-zinc-100" : "text-zinc-900"}`}>
+              Apple Notes
+            </span>
+            <span
+              className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${
+                isDark ? "bg-emerald-400/10 text-emerald-300" : "bg-emerald-50 text-emerald-700"
+              }`}
+            >
+              Read-only
+            </span>
+          </div>
+          <p className={`text-xs ${muted} leading-snug mt-0.5 line-clamp-2`}>
+            Searches and reads local Apple Notes from this Mac. Requires macOS Automation permission for Notes.
+          </p>
+          <div className="mt-1.5 flex flex-wrap items-center gap-2">
+            <span className={`inline-flex items-center gap-1.5 text-xs ${state.textClass}`}>
+              <span className={`w-1.5 h-1.5 rounded-full ${state.dotClass}`} />
+              {state.label}
+            </span>
+            {permission && permission !== "granted" && (
+              <span className={`text-[10px] mono ${muted}`}>notes={permission}</span>
+            )}
+          </div>
+        </div>
+        {demoMode ? (
+          <DemoReadyPill isDark={isDark} />
+        ) : (
+          <div className="flex shrink-0 items-center gap-2">
+            <button
+              onClick={onRefresh}
+              disabled={busy}
+              className={`rounded-xl border px-2.5 py-1.5 text-xs transition-colors ${
+                isDark
+                  ? "border-white/10 text-zinc-300 hover:bg-white/5"
+                  : "border-zinc-200 text-zinc-600 hover:bg-zinc-100"
+              } disabled:opacity-50`}
+            >
+              Refresh
+            </button>
+            <button
+              onClick={() => onToggle(!enabled)}
+              disabled={busy || !loaded}
+              className={`rounded-xl px-3 py-1.5 text-xs font-medium transition-colors ${
+                busy || !loaded
+                  ? isDark
+                    ? "bg-zinc-700 text-zinc-400"
+                    : "bg-zinc-200 text-zinc-500"
+                  : enabled
+                    ? isDark
+                      ? "border border-white/10 text-zinc-300 hover:bg-white/5"
+                      : "border border-zinc-200 text-zinc-600 hover:bg-zinc-100"
+                    : isDark
+                      ? "bg-zinc-100 text-zinc-950 hover:bg-white"
+                      : "bg-zinc-950 text-white hover:bg-zinc-800"
+              }`}
+            >
+              {buttonLabel}
+            </button>
+          </div>
+        )}
+      </div>
+
+      {enabled && !bridge?.running && (
+        <div
+          className={`mt-3 rounded-xl border px-3 py-2 text-xs leading-relaxed ${
+            isDark
+              ? "border-amber-500/20 bg-amber-500/5 text-amber-200"
+              : "border-amber-200 bg-amber-50 text-amber-800"
+          }`}
+        >
+          Apple Notes reads only work on macOS. Run Boop on the Mac whose Notes you want to read.
+          {bridge?.error && <span className="block mt-1 mono text-[11px] opacity-80">{bridge.error}</span>}
+        </div>
+      )}
+
+      {enabled && bridge?.running && permission !== "granted" && (
+        <div
+          className={`mt-3 rounded-xl border px-3 py-2 text-xs leading-relaxed ${
+            permission === "denied"
+              ? isDark
+                ? "border-rose-500/20 bg-rose-500/5 text-rose-200"
+                : "border-rose-200 bg-rose-50 text-rose-700"
+              : isDark
+                ? "border-amber-500/20 bg-amber-500/5 text-amber-200"
+                : "border-amber-200 bg-amber-50 text-amber-800"
+          }`}
+        >
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <span>
+              Allow the app running Boop to control Notes. Boop only exposes read-only note tools.
+            </span>
+            <div className="flex shrink-0 flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={onRequestNotesAccess}
+                disabled={busy}
+                className={`rounded-xl px-2.5 py-1.5 text-xs font-medium transition-colors ${
+                  isDark
+                    ? "bg-zinc-100 text-zinc-950 hover:bg-white disabled:opacity-50"
+                    : "bg-zinc-950 text-white hover:bg-zinc-800 disabled:opacity-50"
+                }`}
+              >
+                Enable Notes
+              </button>
+              <button
+                type="button"
+                onClick={onOpenAutomationSettings}
+                disabled={busy}
+                className={`rounded-xl border px-2.5 py-1.5 text-xs font-medium transition-colors ${
+                  isDark
+                    ? "border-white/10 text-zinc-300 hover:bg-white/5 disabled:opacity-50"
+                    : "border-zinc-200 text-zinc-600 hover:bg-zinc-100 disabled:opacity-50"
+                }`}
+              >
+                Automation Settings
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AppleRemindersConnectionCard({
+  status,
+  loaded,
+  busy,
+  cardBg,
+  muted,
+  isDark,
+  demoMode,
+  onToggle,
+  onRefresh,
+  onRequestRemindersAccess,
+  onOpenAutomationSettings,
+}: {
+  status: AppleStatus | null;
+  loaded: boolean;
+  busy: boolean;
+  cardBg: string;
+  muted: string;
+  isDark: boolean;
+  demoMode?: boolean;
+  onToggle: (enabled: boolean) => void;
+  onRefresh: () => void;
+  onRequestRemindersAccess: () => void;
+  onOpenAutomationSettings: () => void;
+}) {
+  const enabled = status?.remindersEnabled ?? false;
+  const bridge = status?.bridge ?? null;
+  const permission = bridge?.permissions?.reminders;
+  const state = appleRemindersConnectionState(status, loaded);
+  const buttonLabel = busy ? "Working..." : enabled ? "Disconnect" : "Connect";
+
+  return (
+    <div className={`rounded-2xl border px-4 py-3.5 shadow-sm fade-in ${cardBg}`}>
+      <div className="flex items-center gap-4">
+        <IntegrationLogo raw="apple-reminders" size={32} />
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className={`text-sm font-medium ${isDark ? "text-zinc-100" : "text-zinc-900"}`}>
+              Apple Reminders
+            </span>
+            <span
+              className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${
+                isDark ? "bg-emerald-400/10 text-emerald-300" : "bg-emerald-50 text-emerald-700"
+              }`}
+            >
+              Read-only
+            </span>
+          </div>
+          <p className={`text-xs ${muted} leading-snug mt-0.5 line-clamp-2`}>
+            Lists local Apple Reminders from this Mac. Requires macOS Automation permission for Reminders.
+          </p>
+          <div className="mt-1.5 flex flex-wrap items-center gap-2">
+            <span className={`inline-flex items-center gap-1.5 text-xs ${state.textClass}`}>
+              <span className={`w-1.5 h-1.5 rounded-full ${state.dotClass}`} />
+              {state.label}
+            </span>
+            {permission && permission !== "granted" && (
+              <span className={`text-[10px] mono ${muted}`}>reminders={permission}</span>
+            )}
+          </div>
+        </div>
+        {demoMode ? (
+          <DemoReadyPill isDark={isDark} />
+        ) : (
+          <div className="flex shrink-0 items-center gap-2">
+            <button
+              onClick={onRefresh}
+              disabled={busy}
+              className={`rounded-xl border px-2.5 py-1.5 text-xs transition-colors ${
+                isDark
+                  ? "border-white/10 text-zinc-300 hover:bg-white/5"
+                  : "border-zinc-200 text-zinc-600 hover:bg-zinc-100"
+              } disabled:opacity-50`}
+            >
+              Refresh
+            </button>
+            <button
+              onClick={() => onToggle(!enabled)}
+              disabled={busy || !loaded}
+              className={`rounded-xl px-3 py-1.5 text-xs font-medium transition-colors ${
+                busy || !loaded
+                  ? isDark
+                    ? "bg-zinc-700 text-zinc-400"
+                    : "bg-zinc-200 text-zinc-500"
+                  : enabled
+                    ? isDark
+                      ? "border border-white/10 text-zinc-300 hover:bg-white/5"
+                      : "border border-zinc-200 text-zinc-600 hover:bg-zinc-100"
+                    : isDark
+                      ? "bg-zinc-100 text-zinc-950 hover:bg-white"
+                      : "bg-zinc-950 text-white hover:bg-zinc-800"
+              }`}
+            >
+              {buttonLabel}
+            </button>
+          </div>
+        )}
+      </div>
+
+      {enabled && !bridge?.running && (
+        <div
+          className={`mt-3 rounded-xl border px-3 py-2 text-xs leading-relaxed ${
+            isDark
+              ? "border-amber-500/20 bg-amber-500/5 text-amber-200"
+              : "border-amber-200 bg-amber-50 text-amber-800"
+          }`}
+        >
+          Apple Reminders reads only work on macOS. Run Boop on the Mac whose Reminders you want to read.
+          {bridge?.error && <span className="block mt-1 mono text-[11px] opacity-80">{bridge.error}</span>}
+        </div>
+      )}
+
+      {enabled && bridge?.running && permission !== "granted" && (
+        <div
+          className={`mt-3 rounded-xl border px-3 py-2 text-xs leading-relaxed ${
+            permission === "denied"
+              ? isDark
+                ? "border-rose-500/20 bg-rose-500/5 text-rose-200"
+                : "border-rose-200 bg-rose-50 text-rose-700"
+              : isDark
+                ? "border-amber-500/20 bg-amber-500/5 text-amber-200"
+                : "border-amber-200 bg-amber-50 text-amber-800"
+          }`}
+        >
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <span>
+              Allow the app running Boop to control Reminders. Boop only exposes read-only reminder tools.
+            </span>
+            <div className="flex shrink-0 flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={onRequestRemindersAccess}
+                disabled={busy}
+                className={`rounded-xl px-2.5 py-1.5 text-xs font-medium transition-colors ${
+                  isDark
+                    ? "bg-zinc-100 text-zinc-950 hover:bg-white disabled:opacity-50"
+                    : "bg-zinc-950 text-white hover:bg-zinc-800 disabled:opacity-50"
+                }`}
+              >
+                Enable Reminders
+              </button>
+              <button
+                type="button"
+                onClick={onOpenAutomationSettings}
+                disabled={busy}
+                className={`rounded-xl border px-2.5 py-1.5 text-xs font-medium transition-colors ${
+                  isDark
+                    ? "border-white/10 text-zinc-300 hover:bg-white/5 disabled:opacity-50"
+                    : "border-zinc-200 text-zinc-600 hover:bg-zinc-100 disabled:opacity-50"
+                }`}
+              >
+                Automation Settings
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function imessageConnectionState(status: AppleStatus | null, loaded: boolean): {
+  label: string;
+  dotClass: string;
+  textClass: string;
+} {
+  if (!loaded) {
+    return { label: "Checking", dotClass: "bg-zinc-400", textClass: "text-zinc-500" };
+  }
+  if (!status?.messagesEnabled) {
+    return { label: "Not connected", dotClass: "bg-zinc-500", textClass: "text-zinc-500" };
+  }
+  if (!status.bridge.running) {
+    return { label: "Local Mac unavailable", dotClass: "bg-amber-400", textClass: "text-amber-500" };
+  }
+  if (status.bridge.permissions?.messages === "granted") {
+    return { label: "Connected", dotClass: "bg-emerald-400", textClass: "text-emerald-500" };
+  }
+  if (status.bridge.permissions?.messages === "denied") {
+    return { label: "Needs Full Disk Access", dotClass: "bg-rose-400", textClass: "text-rose-500" };
+  }
+  return { label: "Permission pending", dotClass: "bg-amber-400", textClass: "text-amber-500" };
+}
+
+function appleNotesConnectionState(status: AppleStatus | null, loaded: boolean): {
+  label: string;
+  dotClass: string;
+  textClass: string;
+} {
+  if (!loaded) {
+    return { label: "Checking", dotClass: "bg-zinc-400", textClass: "text-zinc-500" };
+  }
+  if (!status?.notesEnabled) {
+    return { label: "Not connected", dotClass: "bg-zinc-500", textClass: "text-zinc-500" };
+  }
+  if (!status.bridge.running) {
+    return { label: "Local Mac unavailable", dotClass: "bg-amber-400", textClass: "text-amber-500" };
+  }
+  if (status.bridge.permissions?.notes === "granted") {
+    return { label: "Connected", dotClass: "bg-emerald-400", textClass: "text-emerald-500" };
+  }
+  if (status.bridge.permissions?.notes === "denied") {
+    return { label: "Needs Automation", dotClass: "bg-rose-400", textClass: "text-rose-500" };
+  }
+  return { label: "Permission pending", dotClass: "bg-amber-400", textClass: "text-amber-500" };
+}
+
+function appleRemindersConnectionState(status: AppleStatus | null, loaded: boolean): {
+  label: string;
+  dotClass: string;
+  textClass: string;
+} {
+  if (!loaded) {
+    return { label: "Checking", dotClass: "bg-zinc-400", textClass: "text-zinc-500" };
+  }
+  if (!status?.remindersEnabled) {
+    return { label: "Not connected", dotClass: "bg-zinc-500", textClass: "text-zinc-500" };
+  }
+  if (!status.bridge.running) {
+    return { label: "Local Mac unavailable", dotClass: "bg-amber-400", textClass: "text-amber-500" };
+  }
+  if (status.bridge.permissions?.reminders === "granted") {
+    return { label: "Connected", dotClass: "bg-emerald-400", textClass: "text-emerald-500" };
+  }
+  if (status.bridge.permissions?.reminders === "denied") {
+    return { label: "Needs Automation", dotClass: "bg-rose-400", textClass: "text-rose-500" };
+  }
+  return { label: "Permission pending", dotClass: "bg-amber-400", textClass: "text-amber-500" };
+}
+
+function DemoReadyPill({ isDark }: { isDark: boolean }) {
+  return (
+    <span
+      className={`shrink-0 rounded-xl border px-2.5 py-1.5 text-xs font-medium ${
+        isDark
+          ? "border-emerald-400/20 bg-emerald-400/10 text-emerald-300"
+          : "border-emerald-200 bg-emerald-50 text-emerald-700"
+      }`}
+    >
+      Ready
+    </span>
+  );
+}
+
 function ToolkitCard({
   t,
   busy,
   cardBg,
   muted,
   isDark,
+  demoMode,
   expanded,
   tools,
   onConnect,
@@ -557,6 +1639,7 @@ function ToolkitCard({
   cardBg: string;
   muted: string;
   isDark: boolean;
+  demoMode?: boolean;
   expanded: boolean;
   tools: ToolSummary[] | "loading" | "error" | undefined;
   onConnect: (slug: string) => void;
@@ -611,7 +1694,7 @@ function ToolkitCard({
             </span>
           )}
         </div>
-        {!hasConnections && !needsSetup && (
+        {!demoMode && !hasConnections && !needsSetup && (
           <button
             onClick={() => onConnect(t.slug)}
             disabled={connectBusy}
@@ -628,7 +1711,7 @@ function ToolkitCard({
             {connectBusy ? "Connecting…" : "Connect"}
           </button>
         )}
-        {needsSetup && (
+        {!demoMode && needsSetup && (
           <span
             className={`text-[10px] px-2 py-0.5 rounded-full font-medium shrink-0 ${
               isDark ? "bg-amber-400/10 text-amber-400" : "bg-amber-50 text-amber-700"
@@ -639,7 +1722,9 @@ function ToolkitCard({
         )}
       </div>
 
-      {needsSetup && <ByoSetupSteps slug={t.slug} isDark={isDark} muted={muted} onConnect={onConnect} />}
+      {!demoMode && needsSetup && (
+        <ByoSetupSteps slug={t.slug} isDark={isDark} muted={muted} onConnect={onConnect} />
+      )}
 
       {hasConnections && (
         <div className="mt-3 space-y-1.5">
@@ -652,21 +1737,24 @@ function ToolkitCard({
               busy={busy === `${t.slug}:${c.id}`}
               isDark={isDark}
               muted={muted}
+              demoMode={demoMode}
               onDisconnect={onDisconnect}
               onRename={onRename}
             />
           ))}
-          <button
-            onClick={() => onConnect(t.slug)}
-            disabled={connectBusy}
-            className={`rounded-xl px-2.5 py-1.5 text-xs transition-colors ${
-              isDark
-                ? "border border-white/10 text-zinc-300 hover:bg-white/5"
-                : "border border-zinc-200 text-zinc-600 hover:bg-zinc-100"
-            } ${connectBusy ? "opacity-50" : ""}`}
-          >
-            {connectBusy ? "Connecting…" : "+ Add another account"}
-          </button>
+          {!demoMode && (
+            <button
+              onClick={() => onConnect(t.slug)}
+              disabled={connectBusy}
+              className={`rounded-xl px-2.5 py-1.5 text-xs transition-colors ${
+                isDark
+                  ? "border border-white/10 text-zinc-300 hover:bg-white/5"
+                  : "border border-zinc-200 text-zinc-600 hover:bg-zinc-100"
+              } ${connectBusy ? "opacity-50" : ""}`}
+            >
+              {connectBusy ? "Connecting…" : "+ Add another account"}
+            </button>
+          )}
         </div>
       )}
 
@@ -682,6 +1770,7 @@ function ConnectionRow({
   busy,
   isDark,
   muted,
+  demoMode,
   onDisconnect,
   onRename,
 }: {
@@ -691,6 +1780,7 @@ function ConnectionRow({
   busy: boolean;
   isDark: boolean;
   muted: string;
+  demoMode?: boolean;
   onDisconnect: (slug: string, connectionId: string) => void;
   onRename: (connectionId: string, alias: string) => Promise<boolean>;
 }) {
@@ -786,46 +1876,50 @@ function ConnectionRow({
       </span>
       <span className={`text-[10px] mono ${muted} truncate`}>{conn.id}</span>
       <div className="flex-1" />
-      {editing ? (
-        <>
+      {!demoMode && (
+        editing ? (
+          <>
+            <button
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => void submit()}
+              disabled={saving}
+              className={`text-[11px] underline ${
+                isDark ? "text-zinc-300 hover:text-white" : "text-zinc-700 hover:text-zinc-950"
+              } disabled:opacity-50`}
+            >
+              {saving ? "Saving…" : "Save"}
+            </button>
+            <button
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={cancelEdit}
+              disabled={saving}
+              className={`text-[11px] underline ${muted} hover:text-rose-500 disabled:opacity-50`}
+            >
+              Cancel
+            </button>
+          </>
+        ) : (
           <button
-            onMouseDown={(e) => e.preventDefault()}
-            onClick={() => void submit()}
-            disabled={saving}
-            className={`text-[11px] underline ${
-              isDark ? "text-zinc-300 hover:text-white" : "text-zinc-700 hover:text-zinc-950"
-            } disabled:opacity-50`}
+            onClick={startEdit}
+            className={`rounded-lg px-1.5 py-0.5 text-[11px] ${muted} ${isDark ? "hover:bg-white/5 hover:text-zinc-200" : "hover:bg-zinc-100 hover:text-zinc-800"}`}
           >
-            {saving ? "Saving…" : "Save"}
+            Rename
           </button>
-          <button
-            onMouseDown={(e) => e.preventDefault()}
-            onClick={cancelEdit}
-            disabled={saving}
-            className={`text-[11px] underline ${muted} hover:text-rose-500 disabled:opacity-50`}
-          >
-            Cancel
-          </button>
-        </>
-      ) : (
+        )
+      )}
+      {!demoMode && (
         <button
-          onClick={startEdit}
-          className={`rounded-lg px-1.5 py-0.5 text-[11px] ${muted} ${isDark ? "hover:bg-white/5 hover:text-zinc-200" : "hover:bg-zinc-100 hover:text-zinc-800"}`}
+          onClick={() => onDisconnect(slug, conn.id)}
+          disabled={busy || editing}
+          className={`rounded-lg px-2 py-0.5 text-[11px] transition-colors ${
+            isDark
+              ? "bg-white/5 text-zinc-300 hover:bg-white/10 disabled:opacity-50"
+              : "bg-zinc-200 text-zinc-700 hover:bg-zinc-300 disabled:opacity-50"
+          }`}
         >
-          Rename
+          {busy ? "…" : "Disconnect"}
         </button>
       )}
-      <button
-        onClick={() => onDisconnect(slug, conn.id)}
-        disabled={busy || editing}
-        className={`rounded-lg px-2 py-0.5 text-[11px] transition-colors ${
-          isDark
-            ? "bg-white/5 text-zinc-300 hover:bg-white/10 disabled:opacity-50"
-            : "bg-zinc-200 text-zinc-700 hover:bg-zinc-300 disabled:opacity-50"
-        }`}
-      >
-        {busy ? "…" : "Disconnect"}
-      </button>
     </div>
   );
 }

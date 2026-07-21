@@ -13,11 +13,16 @@ const EVENT_COLOR: Record<string, string> = {
   "memory.recalled": "bg-sky-500/20 text-sky-400",
   "memory.extracted": "bg-violet-500/20 text-violet-400",
   "memory.consolidated": "bg-amber-500/20 text-amber-400",
+  "memory.promoted": "bg-emerald-500/20 text-emerald-400",
+  "memory.merged": "bg-cyan-500/20 text-cyan-400",
+  "memory.pruned": "bg-rose-500/20 text-rose-400",
   "memory.cleaned": "bg-zinc-500/20 text-zinc-400",
+  "consolidation.proposed": "bg-amber-500/20 text-amber-400",
+  "consolidation.applied": "bg-lime-500/20 text-lime-500",
 };
 
 export function EventsPanel({ isDark }: { isDark: boolean }) {
-  const events = useQuery(api.memoryEvents.recent, { limit: 200 });
+  const events = useQuery(api.memoryEvents.recentForDashboard, { limit: 200 });
   const muted = mutedTextClass(isDark);
   const list = events ?? [];
 

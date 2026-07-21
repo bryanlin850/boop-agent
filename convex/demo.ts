@@ -1,12 +1,11 @@
 import { mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { v } from "convex/values";
+import { DEMO_PREFIX, DEMO_SCAN_LIMIT, DEMO_SETTING_KEY, isDemoId } from "./demoMode";
 
-const DEMO_PREFIX = "demo:";
-const DEMO_SETTING_KEY = "debug_demo_mode";
-const SCAN_LIMIT = 5000;
 const MINUTE = 60 * 1000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
+const DEMO_EMBEDDING_DIMENSIONS = 1024;
 
 type Runtime = "claude" | "codex";
 type BillingMode = "api" | "codex-subscription";
@@ -49,6 +48,7 @@ interface AgentTemplate {
   task: string;
   result: string;
   error?: string;
+  status?: AgentStatus;
   integrations: string[];
   tool: string;
   query: string;
@@ -60,10 +60,7 @@ interface MemoryTemplate {
   segment: MemorySegment;
   tier: MemoryTier;
   importance: number;
-}
-
-function isDemoId(value?: string | null): boolean {
-  return typeof value === "string" && value.startsWith(DEMO_PREFIX);
+  graphLabel?: string;
 }
 
 function ago(now: number, days: number, offset = 0): number {
@@ -72,6 +69,27 @@ function ago(now: number, days: number, offset = 0): number {
 
 function compactNumber(value: number, precision = 4): number {
   return Number(value.toFixed(precision));
+}
+
+function demoEmbedding(content: string): number[] {
+  let seed = 2166136261;
+  for (let index = 0; index < content.length; index += 1) {
+    seed = Math.imul(seed ^ content.charCodeAt(index), 16777619) >>> 0;
+  }
+
+  const vector: number[] = [];
+  let sumSquares = 0;
+  for (let index = 0; index < DEMO_EMBEDDING_DIMENSIONS; index += 1) {
+    seed = Math.imul(seed ^ (seed >>> 15), 2246822507) >>> 0;
+    seed = Math.imul(seed ^ (seed >>> 13), 3266489909) >>> 0;
+    seed = Math.imul(seed ^ index, 16777619) >>> 0;
+    const value = (seed / 0xffffffff) * 2 - 1;
+    vector.push(value);
+    sumSquares += value * value;
+  }
+
+  const magnitude = Math.sqrt(sumSquares) || 1;
+  return vector.map((value) => compactNumber(value / magnitude, 6));
 }
 
 function pick<T>(items: readonly T[], index: number): T {
@@ -116,16 +134,16 @@ async function demoCounts(ctx: QueryCtx | MutationCtx): Promise<DemoCounts> {
     consolidationRuns,
     usageRecords,
   ] = await Promise.all([
-    ctx.db.query("conversations").order("desc").take(SCAN_LIMIT),
-    ctx.db.query("messages").order("desc").take(SCAN_LIMIT),
-    ctx.db.query("executionAgents").order("desc").take(SCAN_LIMIT),
-    ctx.db.query("agentLogs").order("desc").take(SCAN_LIMIT),
-    ctx.db.query("memoryRecords").order("desc").take(SCAN_LIMIT),
-    ctx.db.query("memoryEvents").order("desc").take(SCAN_LIMIT),
-    ctx.db.query("automations").order("desc").take(SCAN_LIMIT),
-    ctx.db.query("automationRuns").order("desc").take(SCAN_LIMIT),
-    ctx.db.query("consolidationRuns").order("desc").take(SCAN_LIMIT),
-    ctx.db.query("usageRecords").order("desc").take(SCAN_LIMIT),
+    ctx.db.query("conversations").order("desc").take(DEMO_SCAN_LIMIT),
+    ctx.db.query("messages").order("desc").take(DEMO_SCAN_LIMIT),
+    ctx.db.query("executionAgents").order("desc").take(DEMO_SCAN_LIMIT),
+    ctx.db.query("agentLogs").order("desc").take(DEMO_SCAN_LIMIT),
+    ctx.db.query("memoryRecords").order("desc").take(DEMO_SCAN_LIMIT),
+    ctx.db.query("memoryEvents").order("desc").take(DEMO_SCAN_LIMIT),
+    ctx.db.query("automations").order("desc").take(DEMO_SCAN_LIMIT),
+    ctx.db.query("automationRuns").order("desc").take(DEMO_SCAN_LIMIT),
+    ctx.db.query("consolidationRuns").order("desc").take(DEMO_SCAN_LIMIT),
+    ctx.db.query("usageRecords").order("desc").take(DEMO_SCAN_LIMIT),
   ]);
 
   return {
@@ -162,14 +180,14 @@ async function deleteDemoRows(ctx: MutationCtx): Promise<DemoCounts> {
     usageRecords: 0,
   };
 
-  const agentLogs = await ctx.db.query("agentLogs").order("desc").take(SCAN_LIMIT);
+  const agentLogs = await ctx.db.query("agentLogs").order("desc").take(DEMO_SCAN_LIMIT);
   for (const row of agentLogs) {
     if (!isDemoId(row.agentId)) continue;
     await ctx.db.delete(row._id);
     counts.agentLogs += 1;
   }
 
-  const automationRuns = await ctx.db.query("automationRuns").order("desc").take(SCAN_LIMIT);
+  const automationRuns = await ctx.db.query("automationRuns").order("desc").take(DEMO_SCAN_LIMIT);
   for (const row of automationRuns) {
     if (!isDemoId(row.runId) && !isDemoId(row.automationId) && !isDemoId(row.agentId)) {
       continue;
@@ -178,7 +196,7 @@ async function deleteDemoRows(ctx: MutationCtx): Promise<DemoCounts> {
     counts.automationRuns += 1;
   }
 
-  const usageRecords = await ctx.db.query("usageRecords").order("desc").take(SCAN_LIMIT);
+  const usageRecords = await ctx.db.query("usageRecords").order("desc").take(DEMO_SCAN_LIMIT);
   for (const row of usageRecords) {
     if (!isDemoId(row.conversationId) && !isDemoId(row.agentId) && !isDemoId(row.runId)) {
       continue;
@@ -187,7 +205,7 @@ async function deleteDemoRows(ctx: MutationCtx): Promise<DemoCounts> {
     counts.usageRecords += 1;
   }
 
-  const memoryEvents = await ctx.db.query("memoryEvents").order("desc").take(SCAN_LIMIT);
+  const memoryEvents = await ctx.db.query("memoryEvents").order("desc").take(DEMO_SCAN_LIMIT);
   for (const row of memoryEvents) {
     if (!isDemoId(row.conversationId) && !isDemoId(row.memoryId) && !isDemoId(row.agentId)) {
       continue;
@@ -199,42 +217,42 @@ async function deleteDemoRows(ctx: MutationCtx): Promise<DemoCounts> {
   const consolidationRuns = await ctx.db
     .query("consolidationRuns")
     .order("desc")
-    .take(SCAN_LIMIT);
+    .take(DEMO_SCAN_LIMIT);
   for (const row of consolidationRuns) {
     if (!isDemoId(row.runId)) continue;
     await ctx.db.delete(row._id);
     counts.consolidationRuns += 1;
   }
 
-  const agents = await ctx.db.query("executionAgents").order("desc").take(SCAN_LIMIT);
+  const agents = await ctx.db.query("executionAgents").order("desc").take(DEMO_SCAN_LIMIT);
   for (const row of agents) {
     if (!isDemoId(row.agentId)) continue;
     await ctx.db.delete(row._id);
     counts.agents += 1;
   }
 
-  const memories = await ctx.db.query("memoryRecords").order("desc").take(SCAN_LIMIT);
+  const memories = await ctx.db.query("memoryRecords").order("desc").take(DEMO_SCAN_LIMIT);
   for (const row of memories) {
     if (!isDemoId(row.memoryId)) continue;
     await ctx.db.delete(row._id);
     counts.memories += 1;
   }
 
-  const automations = await ctx.db.query("automations").order("desc").take(SCAN_LIMIT);
+  const automations = await ctx.db.query("automations").order("desc").take(DEMO_SCAN_LIMIT);
   for (const row of automations) {
     if (!isDemoId(row.automationId)) continue;
     await ctx.db.delete(row._id);
     counts.automations += 1;
   }
 
-  const messages = await ctx.db.query("messages").order("desc").take(SCAN_LIMIT);
+  const messages = await ctx.db.query("messages").order("desc").take(DEMO_SCAN_LIMIT);
   for (const row of messages) {
     if (!isDemoId(row.conversationId) && !isDemoId(row.agentId)) continue;
     await ctx.db.delete(row._id);
     counts.messages += 1;
   }
 
-  const conversations = await ctx.db.query("conversations").order("desc").take(SCAN_LIMIT);
+  const conversations = await ctx.db.query("conversations").order("desc").take(DEMO_SCAN_LIMIT);
   for (const row of conversations) {
     if (!isDemoId(row.conversationId)) continue;
     await ctx.db.delete(row._id);
@@ -505,7 +523,7 @@ const agentTemplates: AgentTemplate[] = [
     name: "Memory recall trace",
     task: "Trace which memories were recalled for the calendar scheduling turn.",
     result:
-      "Recalled 6 memories: no early Friday meetings, Amie-like dashboard style, concise briefs, and launch-week stakeholders.",
+      "Recalled 6 memories: no early Friday meetings, compact calendar-first dashboards, concise briefs, and launch-week stakeholders.",
     integrations: ["boop_memory"],
     tool: "mcp__boop-memory__recall",
     query: "calendar scheduling constraints launch week",
@@ -591,115 +609,296 @@ const agentTemplates: AgentTemplate[] = [
     query: "shipped blockers tomorrow",
     conversationId: "demo:conversation:launch-week",
   },
+  {
+    name: "Sub-agent · Inbox evidence pack",
+    task: "Collect the three email threads that matter for the product review and summarize the decision needed in each one.",
+    result:
+      "Found the renewal thread, the escalation thread, and the invoice question. Marked the renewal as the only one that needs a reply before the review.",
+    status: "completed",
+    integrations: ["gmail", "boop_memory"],
+    tool: "mcp__gmail__search_email",
+    query: "newer_than:48h renewal OR escalation OR invoice",
+    conversationId: "demo:conversation:morning-brief",
+  },
+  {
+    name: "Sub-agent · Calendar pressure map",
+    task: "Check the calendar for conflicts, prep gaps, and movable meetings before the afternoon product review.",
+    result:
+      "Mapped two tight windows, found one movable recruiting sync, and preserved a 90-minute writing block before the product review.",
+    status: "running",
+    integrations: ["googlecalendar", "boop_memory"],
+    tool: "mcp__googlecalendar__list_events",
+    query: "today conflicts prep gaps product review",
+    conversationId: "demo:conversation:morning-brief",
+  },
+  {
+    name: "Sub-agent · Launch blocker sweep",
+    task: "Search Linear and GitHub for launch blockers that changed since yesterday and group them by owner.",
+    result:
+      "Grouped six blockers by owner. Two need reproduction notes, one is waiting on review, and three are already in progress.",
+    status: "completed",
+    integrations: ["linear", "github"],
+    tool: "mcp__linear__search_issues",
+    query: "label:launch-blocker updated_since:yesterday",
+    conversationId: "demo:conversation:launch-week",
+  },
+  {
+    name: "Sub-agent · Customer reply polish",
+    task: "Draft the customer reply from the latest incident window and leave it pending for approval.",
+    result:
+      "Prepared a pending draft that acknowledges the missed deadline, explains the retry fix, and promises the next check-in time.",
+    status: "completed",
+    integrations: ["gmail", "notion", "linear"],
+    tool: "mcp__gmail__create_draft",
+    query: "customer incident retry fix next check-in",
+    conversationId: "demo:conversation:launch-week",
+  },
+  {
+    name: "Sub-agent · Notes and receipt sweep",
+    task: "Search local notes and Drive for open personal-admin items that should not be lost during launch week.",
+    result:
+      "Found the package pickup cutoff, the reimbursement packet, and the hotel cancellation deadline. Added them to the afternoon brief.",
+    status: "completed",
+    integrations: ["apple-notes", "googledrive", "apple-reminders"],
+    tool: "mcp__apple-notes__search_notes",
+    query: "package pickup reimbursement hotel cancellation",
+    conversationId: "demo:conversation:personal-admin",
+  },
+  {
+    name: "Product review command center",
+    task: "Respond to the user's text: 'What needs my attention before the product review?' Delegate inbox, calendar, blocker, draft, and personal-admin checks, then return a concise action plan.",
+    result:
+      "Prepared the product review brief: send the renewal reply, move the recruiting sync, review two launch blockers, and handle the package pickup before the evening cutoff.",
+    status: "completed",
+    integrations: ["imessage", "gmail", "googlecalendar", "linear", "slack", "boop_memory"],
+    tool: "mcp__imessage__read_messages",
+    query: "latest product review attention request",
+    conversationId: "demo:conversation:morning-brief",
+  },
 ];
 
 const memoryTemplates: MemoryTemplate[] = [
   {
     content:
-      "The debug dashboard redesign should feel like a calm productivity desktop app, with the left side as the app background and the right side as the main container.",
-    segment: "project",
-    tier: "permanent",
-    importance: 0.96,
-  },
-  {
-    content:
-      "Use Geist Sans for interface text and Geist Mono for debug values, IDs, costs, and token counts.",
+      "Prefers the recommended next action first, followed by the short reason and any tradeoffs.",
     segment: "preference",
     tier: "permanent",
-    importance: 0.91,
+    importance: 0.95,
+    graphLabel: "Lead with the action",
   },
   {
     content:
-      "The user prefers compact, direct engineering communication without cheerleading or generic filler.",
+      "Default to the home timezone for scheduling, but confirm travel plans in the destination's local time.",
     segment: "preference",
     tier: "permanent",
-    importance: 0.93,
+    importance: 0.9,
+    graphLabel: "Timezone-aware scheduling",
   },
   {
     content:
-      "Avoid meetings before 9:30 AM on Fridays unless the user explicitly approves the exception.",
+      "Avoid meetings before 9:30 AM on Fridays unless the exception is explicitly approved.",
     segment: "preference",
     tier: "long",
     importance: 0.88,
+    graphLabel: "No early Fridays",
   },
   {
     content:
-      "Launch week owners: backend owns webhook retry policy, design owns dashboard QA, and support owns customer follow-up drafts.",
-    segment: "relationship",
-    tier: "long",
-    importance: 0.79,
-  },
-  {
-    content:
-      "The beta feedback summary should cite source Slack messages and group themes by calendar trust, memory explainability, and connection recovery.",
-    segment: "project",
-    tier: "long",
-    importance: 0.82,
-  },
-  {
-    content:
-      "If an automation writes a customer draft, it should leave the draft pending unless the user has pre-approved that exact workflow.",
-    segment: "knowledge",
-    tier: "permanent",
-    importance: 0.87,
-  },
-  {
-    content:
-      "The user likes very rounded controls for segmented switches and toggles, but dashboard cards should be slightly less rounded.",
+      "Keep evenings after 6 PM open unless the request is urgent or the evening is explicitly available.",
     segment: "preference",
     tier: "long",
-    importance: 0.83,
+    importance: 0.86,
+    graphLabel: "Protect evenings",
   },
   {
     content:
-      "The top-right model badge should show both provider logo and model name, while connection health can live under the logo on the left.",
-    segment: "project",
-    tier: "long",
-    importance: 0.81,
-  },
-  {
-    content:
-      "When demo mode is enabled, fake data must stay namespaced so it can be removed without touching real user data.",
-    segment: "knowledge",
+      "Customer reply drafts should be warm, specific, and left pending for review unless sending was pre-approved.",
+    segment: "preference",
     tier: "permanent",
-    importance: 0.9,
+    importance: 0.91,
+    graphLabel: "Review drafts first",
   },
   {
     content:
-      "For dashboard previews, agents should include detailed tool_use and tool_result logs so the detail screen does not look empty.",
-    segment: "project",
+      "Calendar holds should include location, dial-in link, prep doc, and the decision expected in the meeting.",
+    segment: "preference",
     tier: "long",
     importance: 0.84,
+    graphLabel: "Decision-ready meetings",
   },
   {
     content:
-      "The user wants Settings, Connections, Memories, Events, Automations, and Consolidation to all share the same visual language.",
+      "When comparing options, rank by practical tradeoffs first instead of abstract pros and cons.",
+    segment: "preference",
+    tier: "long",
+    importance: 0.87,
+    graphLabel: "Practical tradeoffs",
+  },
+  {
+    content:
+      "Current launch checklist: pricing FAQ, support macros, webhook recovery notes, billing edge cases, and rollback plan.",
     segment: "project",
     tier: "long",
-    importance: 0.86,
+    importance: 0.83,
+    graphLabel: "Launch checklist",
+  },
+  {
+    content:
+      "Weekend errands should be grouped by neighborhood so the user does not make extra trips across town.",
+    segment: "preference",
+    tier: "long",
+    importance: 0.78,
+    graphLabel: "Batch errands by area",
+  },
+  {
+    content:
+      "For dinner plans with the partner, aim for around 7 PM and somewhere quiet enough to talk.",
+    segment: "relationship",
+    tier: "long",
+    importance: 0.75,
+    graphLabel: "Quiet dinners at seven",
+  },
+  {
+    content:
+      "Workout suggestions should protect knees and shoulders and include warmup cues before heavier sets.",
+    segment: "preference",
+    tier: "permanent",
+    importance: 0.82,
+    graphLabel: "Joint-friendly training",
+  },
+  {
+    content:
+      "For travel, prefer nonstop flights, aisle seats, and hotels within walking distance of meetings.",
+    segment: "preference",
+    tier: "long",
+    importance: 0.8,
+    graphLabel: "Nonstop, aisle, walkable",
   },
 ];
 
 const memoryFillers = [
-  ["context", "short", "The last dashboard preview was on localhost:5174 and the user was reviewing it in the in-app browser."],
-  ["project", "short", "The right-side panel should be flush to the top, right, and bottom edges without a visible right gutter."],
-  ["knowledge", "long", "Tool traces are stored in agentLogs and rendered as a timeline on the agent detail screen."],
-  ["context", "short", "The connection screen should distinguish connected, stale, and action-required account states."],
-  ["preference", "long", "Use icons for recognisable actions instead of text-only controls when a familiar symbol is available."],
-  ["project", "short", "Agent Health should avoid placeholder metrics that do not map to real product concepts."],
-  ["knowledge", "long", "Memory records can be filtered by tier and segment, and active records power the dashboard memory counts."],
-  ["relationship", "long", "The product review attendees usually include the requester, the backend owner, the design owner, the support owner, and a rotating support lead."],
-  ["context", "short", "The latest customer escalation is about delayed webhook retry recovery and needs a short factual reply."],
-  ["identity", "permanent", "The user is building a personal agent workflow around iMessage, memory, automations, and integrations."],
-  ["project", "long", "Demo data should include enough automation runs to test completed, failed, and running states."],
-  ["knowledge", "long", "Consolidation runs store a JSON details blob with proposals, decisions, and applied changes."],
-  ["preference", "permanent", "The user prefers dense but organized operational dashboards over decorative marketing layouts."],
-  ["context", "short", "The morning brief should call out urgent email, calendar pressure, open blockers, and pending drafts."],
-  ["project", "long", "The dashboard uses Google favicon service for integration logos so the app does not need bundled brand assets."],
-  ["knowledge", "long", "Usage records are append-only rows and drive cost and token summaries in the dashboard charts."],
-  ["relationship", "long", "The backend owner should be pinged only after the retry reproduction notes are complete."],
-  ["context", "short", "The hotel hold expires tomorrow evening and should be checked before the end-of-day digest."],
+  ["identity", "permanent", "Runs a small software team and splits time between product decisions, customer support, and engineering reviews."],
+  ["identity", "permanent", "Comfortable reading implementation details, but wants the conclusion before the code path."],
+  ["preference", "permanent", "Status updates should say what changed, what is blocked, who owns it, and the next concrete step."],
+  ["preference", "long", "Customer-facing copy should sound plainspoken and specific, not polished into generic launch language."],
+  ["preference", "long", "Code review summaries should lead with risks and file references before nice-to-have cleanup."],
+  ["preference", "long", "Shopping research should separate the cheapest good option from the best premium option."],
+  ["preference", "long", "Restaurant picks should take reservations, be quiet enough for conversation, and avoid very late seatings."],
+  ["preference", "short", "Today's task list should be sorted by urgency, not by project area."],
+  ["relationship", "long", "The design lead cares most about spacing consistency, mobile screenshots, and whether empty states feel intentional."],
+  ["relationship", "long", "The support lead wants the customer's exact wording quoted before a reply draft is written."],
+  ["relationship", "long", "The operations contact wants receipts grouped by month and project before reimbursement is submitted."],
+  ["relationship", "long", "Send the family group chat travel ETAs only after flight times are confirmed."],
+  ["relationship", "short", "The launch FAQ owner is waiting on the final pricing answer before publishing the help-center draft."],
+  ["project", "long", "Launch FAQ still needs answers for pricing, refunds, account deletion, data export, and webhook setup."],
+  ["project", "long", "Beta feedback digest should group notes into onboarding confusion, notification trust, and missing integrations."],
+  ["project", "long", "Billing cleanup has three open items: duplicate receipts, seat count mismatch, and tax settings."],
+  ["project", "short", "Customer escalation reply needs the corrected incident window, mitigation status, and next update time."],
+  ["project", "short", "Next team update should mention the shipped webhook fix, remaining setup friction, and current support queue volume."],
+  ["project", "short", "Demo script should show a real before-and-after workflow instead of walking through every feature."],
+  ["project", "long", "Hiring scorecard should emphasize writing clarity, product judgment, and comfort debugging ambiguous systems."],
+  ["knowledge", "permanent", "Do not treat absence of a remembered fact as proof it is false; search memory first, then answer carefully."],
+  ["knowledge", "long", "A draft is not sent until the user explicitly approves it, even when the content looks complete."],
+  ["knowledge", "long", "For billing or legal commitments, summarize uncertainty and ask for confirmation before acting."],
+  ["knowledge", "long", "Webhook-dependent workflows need both the active tunnel URL and the provider's registered URL checked."],
+  ["knowledge", "long", "Travel plans should include date, local timezone, airport transfer, and cancellation deadline."],
+  ["knowledge", "long", "Recurring automations should report when they skipped work because no new source material appeared."],
+  ["knowledge", "short", "Focus block ends at 3 PM; do not interrupt it for non-urgent pings."],
+  ["context", "short", "Morning brief should include urgent email, calendar pressure, open blockers, and pending drafts."],
+  ["context", "short", "Tomorrow afternoon's calendar hold still needs an agenda and attendee list."],
+  ["context", "short", "Reimbursement summary is due this week and should include travel, software, and meal receipts."],
+  ["context", "short", "Latest customer reply draft needs a tone check for defensiveness before it is sent."],
+  ["context", "short", "Grocery list should avoid ingredients already at home and keep weeknight meals under 30 minutes."],
+  ["context", "short", "Next workout should be lower impact because the user's knee felt irritated after the last run."],
+  ["context", "short", "Hotel comparison should prioritize sleep quality, walking distance, and cancellation policy over lobby amenities."],
+  ["preference", "long", "When presenting calendar conflicts, explain the tradeoff and recommend which meeting to move."],
+  ["preference", "long", "Financial summaries should include totals, what changed since last time, and anything needing approval."],
+  ["preference", "long", "Use Markdown tables for compact comparisons, but use prose for final recommendations."],
+  ["preference", "long", "For long documents, start with the short answer and then include a skim-friendly outline."],
+  ["preference", "permanent", "Prefer a thoughtful caveat over a confident answer based on stale information."],
+  ["preference", "long", "Leave a buffer after back-to-back calls before scheduling deep work."],
+  ["relationship", "long", "Partner likes itinerary summaries with times, neighborhoods, and confirmation numbers hidden unless needed."],
+  ["relationship", "short", "Contractor is waiting for feedback on the revised statement of work."],
+  ["relationship", "short", "Finance contact prefers reimbursement packets as one organized PDF."],
+  ["relationship", "long", "Customer success lead wants escalation summaries to include owner, severity, and promised follow-up time."],
+  ["relationship", "long", "Editor prefers punchy first lines and fewer abstract claims in public posts."],
+  ["project", "long", "Next public update should focus on workflow outcomes rather than listing every new setting."],
+  ["project", "long", "Onboarding checklist should distinguish required setup from optional integrations."],
+  ["project", "long", "Support macro refresh should remove apologetic filler and add clearer troubleshooting steps."],
+  ["project", "short", "Bug bash is focused on login recovery, webhook setup, notification copy, and empty states."],
+  ["project", "short", "Screenshots need to be checked on desktop and mobile before sharing the update."],
+  ["project", "short", "Launch note should avoid saying 'AI-powered' unless the sentence explains the actual user benefit."],
+  ["knowledge", "permanent", "Never include private customer details in public release notes or demo screenshots."],
+  ["knowledge", "long", "If an automation finds sensitive content, summarize categories and ask before quoting details."],
+  ["knowledge", "long", "Weekly digest should separate shipped work, decisions needed, blocked work, and follow-ups."],
+  ["context", "short", "Package pickup reminder should fire before the building's evening cutoff."],
+  ["context", "short", "Next status update should mention what was verified locally and what still needs review."],
+  ["relationship", "long", "Partner prefers dinner around 7 PM, quiet seating, and no tasting menus on weeknights."],
+  ["project", "long", "Investor update still needs MRR, churn, hiring, and runway sections checked against source numbers."],
+  ["preference", "long", "For flights under four hours, prefer nonstop economy aisle over a cheaper connection."],
+  ["preference", "permanent", "For customer escalations, acknowledge the specific failure first, then explain the fix and next check-in time."],
+  ["context", "short", "Protect a 90-minute writing block before the afternoon call today."],
+  ["project", "short", "Renewal reply should acknowledge the missed deadline first, then propose the make-good and next check-in."],
 ] satisfies Array<[MemorySegment, MemoryTier, string]>;
+
+type DemoMemoryTopic =
+  | "launch"
+  | "customer-care"
+  | "daily-rhythm"
+  | "people"
+  | "travel"
+  | "home-life"
+  | "wellbeing"
+  | "principles";
+
+const demoMemoryTopicRules: Array<[DemoMemoryTopic, RegExp]> = [
+  ["wellbeing", /workout|knee|shoulder|warmup|run|lower impact|health/i],
+  ["travel", /travel|flight|hotel|airport|itinerary|aisle|nonstop|cancellation/i],
+  ["home-life", /grocery|errand|package|dinner|restaurant|weekend|meal|neighborhood/i],
+  [
+    "people",
+    /partner|family|design lead|support lead|operations contact|contractor|finance contact|customer success lead|stakeholder/i,
+  ],
+  ["customer-care", /customer|support|escalation|reply|draft|public post|copy|editor/i],
+  [
+    "launch",
+    /launch|beta|dashboard|onboarding|release|pricing|webhook|bug bash|screenshots?|product|billing|implementation|software team|code review/i,
+  ],
+  [
+    "daily-rhythm",
+    /calendar|meeting|schedule|timezone|friday|focus block|deep work|morning brief|status update|weekly digest|automation|evenings? after/i,
+  ],
+];
+
+function demoMemoryTopic(row: MemoryTemplate): DemoMemoryTopic {
+  return demoMemoryTopicRules.find(([, pattern]) => pattern.test(row.content))?.[0] ?? "principles";
+}
+
+function demoMemoryGraphLabel(row: MemoryTemplate): string {
+  if (row.graphLabel) return row.graphLabel;
+  const labelRules: Array<[RegExp, string]> = [
+    [/billing cleanup/i, "Billing cleanup"],
+    [/customer success lead/i, "Escalation handoffs"],
+    [/grocery list/i, "Fast weeknight meals"],
+    [/hotel comparison/i, "Walkable, flexible hotels"],
+    [/weekly digest/i, "Structured weekly digest"],
+    [/package pickup/i, "Package cutoff"],
+    [/latest customer reply/i, "Tone-check the draft"],
+    [/status updates should/i, "Actionable status updates"],
+    [/beta feedback digest/i, "Beta feedback themes"],
+    [/launch faq/i, "Launch FAQ"],
+  ];
+  const matchedLabel = labelRules.find(([pattern]) => pattern.test(row.content))?.[1];
+  if (matchedLabel) return matchedLabel;
+  const cleaned = row.content
+    .replace(/^(the user|user|current|latest|next)\s+/i, "")
+    .replace(/^(for|when|if)\s+/i, "")
+    .replace(/[.:;,]+$/g, "")
+    .trim();
+  const words = cleaned.split(/\s+/).filter(Boolean);
+  const label = words.slice(0, 5).join(" ");
+  return words.length > 5 ? `${label}...` : label;
+}
 
 const automationSeeds = [
   {
@@ -790,16 +989,97 @@ async function seedConversations(ctx: MutationCtx, now: number) {
   return { conversations: conversationSeeds.length, messages: messageCount };
 }
 
+type DemoLogRow = {
+  logType: "thinking" | "tool_use" | "tool_result" | "text" | "error";
+  toolName?: string;
+  accounts?: string[];
+  content: string;
+};
+
+function demoToolForIntegration(integration: string): string {
+  const normalized = integration.toLowerCase();
+  const map: Record<string, string> = {
+    gmail: "mcp__gmail__search_email",
+    googlecalendar: "mcp__googlecalendar__list_events",
+    linear: "mcp__linear__search_issues",
+    slack: "mcp__slack__search_messages",
+    notion: "mcp__notion__search",
+    github: "mcp__github__search_code",
+    googledrive: "mcp__googledrive__search",
+    googledocs: "mcp__googledocs__fetch",
+    googlesheets: "mcp__googlesheets__read",
+    imessage: "mcp__imessage__read_messages",
+    "apple-notes": "mcp__apple-notes__search_notes",
+    "apple-reminders": "mcp__apple-reminders__list_reminders",
+    boop_memory: "mcp__boop-memory__recall",
+    boop_usage: "mcp__boop-usage__summary",
+  };
+  return map[normalized] ?? `mcp__${normalized.replace(/[^a-z0-9]+/g, "_")}__search`;
+}
+
+function demoAccountForIntegration(integration: string): string {
+  const normalized = integration.toLowerCase();
+  const map: Record<string, string> = {
+    gmail: "primary_inbox_demo",
+    googlecalendar: "work_calendar_demo",
+    linear: "product_workspace_demo",
+    slack: "team_workspace_demo",
+    notion: "launch_workspace_demo",
+    github: "engineering_org_demo",
+    googledrive: "shared_drive_demo",
+    googledocs: "shared_drive_demo",
+    googlesheets: "shared_drive_demo",
+    imessage: "local_messages_demo",
+    "apple-notes": "local_notes_demo",
+    "apple-reminders": "local_reminders_demo",
+    boop_memory: "boop_memory_demo",
+    boop_usage: "boop_usage_demo",
+  };
+  return map[normalized] ?? `${normalized.replace(/[^a-z0-9]+/g, "_")}_demo`;
+}
+
+function demoToolResultText(template: AgentTemplate, integration: string, status: AgentStatus) {
+  if (status === "failed") {
+    return `Partial ${integration} result returned before the retryable failure. Kept successful evidence attached to the run.`;
+  }
+  const displayNames: Record<string, string> = {
+    gmail: "Gmail",
+    googlecalendar: "Google Calendar",
+    linear: "Linear",
+    slack: "Slack",
+    notion: "Notion",
+    github: "GitHub",
+    googledrive: "Google Drive",
+    googledocs: "Google Docs",
+    googlesheets: "Google Sheets",
+    imessage: "iMessage",
+    "apple-notes": "Apple Notes",
+    "apple-reminders": "Apple Reminders",
+    boop_memory: "Boop memory",
+    boop_usage: "Boop usage",
+  };
+  const subject = displayNames[integration] ?? integration.replace(/[_-]+/g, " ");
+  return `${subject} returned relevant context for "${template.name}". ${template.result}`;
+}
+
+function shouldShowDelegation(template: AgentTemplate, index: number): boolean {
+  return (
+    template.name === "Product review command center" ||
+    template.name.includes("command center") ||
+    (template.integrations.length >= 3 && index % 4 === 0)
+  );
+}
+
 async function seedAgentsAndLogs(ctx: MutationCtx, now: number) {
   const statuses: AgentStatus[] = [
     "completed",
     "completed",
     "running",
     "completed",
-    "failed",
     "completed",
     "completed",
-    "cancelled",
+    "completed",
+    "completed",
     "spawned",
     "completed",
     "completed",
@@ -811,7 +1091,7 @@ async function seedAgentsAndLogs(ctx: MutationCtx, now: number) {
     const agentId = `demo:agent:${String(index + 1).padStart(2, "0")}`;
     const runtime: Runtime = index % 3 === 0 || index % 3 === 1 ? "codex" : "claude";
     const billingMode: BillingMode = runtime === "codex" ? "codex-subscription" : "api";
-    const status = pick(statuses, index);
+    const status = template.status ?? pick(statuses, index);
     const isActive = status === "running" || status === "spawned";
     const startedAt = isActive
       ? now - (45 + (index % 6) * 34) * 1000
@@ -861,74 +1141,116 @@ async function seedAgentsAndLogs(ctx: MutationCtx, now: number) {
     });
 
     const baseLogTime = startedAt + 250;
-    const account = `${template.integrations[0] ?? "boop"}_demo`;
-    const toolResult = {
-      successful: status !== "failed",
-      source: template.integrations[0] ?? "boop",
-      results: [
-        {
-          title: template.name,
-          summary: status === "failed" ? "Partial result before retryable failure" : template.result,
-          url: `https://example.com/demo/${encodeURIComponent(agentId)}`,
-        },
-      ],
-    };
+    const primaryIntegration = template.integrations[0] ?? "boop_memory";
+    const secondaryIntegration = template.integrations[1] ?? primaryIntegration;
+    const primaryAccount = demoAccountForIntegration(primaryIntegration);
+    const secondaryAccount = demoAccountForIntegration(secondaryIntegration);
+    const contextTool = "mcp__boop-memory__recall";
+    const secondaryTool = demoToolForIntegration(secondaryIntegration);
+    const delegationRows: DemoLogRow[] = shouldShowDelegation(template, index)
+      ? [
+          {
+            logType: "tool_use",
+            toolName: "spawn_agent",
+            accounts: ["boop_runtime_demo"],
+            content: JSON.stringify({
+              name: "Delegated evidence sweep",
+              task:
+                "Spawn focused sub-agents for inbox evidence, calendar pressure, launch blockers, and customer reply drafting.",
+              integrations: template.integrations.slice(0, 5),
+            }),
+          },
+          {
+            logType: "tool_result",
+            toolName: "spawn_agent",
+            accounts: ["boop_runtime_demo"],
+            content: JSON.stringify({
+              successful: true,
+              data: {
+                results:
+                  "Spawned sub-agents: Inbox evidence pack, Calendar pressure map, Launch blocker sweep, and Customer reply polish. All returned source-backed summaries.",
+              },
+              spawnedAgents: [
+                "demo:agent:29",
+                "demo:agent:30",
+                "demo:agent:31",
+                "demo:agent:32",
+              ],
+            }),
+          },
+        ]
+      : [];
 
-    const logRows = [
+    const logRows: DemoLogRow[] = [
       {
         logType: "thinking" as const,
-        content: `Planning ${template.integrations.join(", ")} calls and checking relevant memories for this turn.\n`,
+        content: `Planning ${template.integrations.join(", ")} calls, checking durable memories, and deciding whether a focused sub-agent should own any part of the work.\n`,
       },
       {
-        logType: "tool_use" as const,
-        toolName: template.tool,
-        accounts: [account],
+        logType: "tool_use",
+        toolName: contextTool,
+        accounts: ["boop_memory_demo"],
         content: JSON.stringify({
-          tool: template.tool,
-          args: { query: template.query, limit: 10, demo: true },
+          query: template.task,
+          limit: 6,
+          includeSegments: ["preference", "project", "context"],
         }),
       },
       {
-        logType: "tool_result" as const,
-        toolName: template.tool,
-        accounts: [account],
-        content: JSON.stringify(toolResult),
-      },
-      {
-        logType: "tool_use" as const,
-        toolName: pick(
-          [
-            "mcp__boop-memory__recall",
-            "mcp__notion__search",
-            "mcp__linear__search_issues",
-            "mcp__github__search_code",
-          ],
-          index,
-        ),
-        accounts: ["boop_demo"],
-        content: JSON.stringify({
-          tool: "context_lookup",
-          args: { query: template.task, limit: 6, demo: true },
-        }),
-      },
-      {
-        logType: "tool_result" as const,
-        toolName: pick(
-          [
-            "mcp__boop-memory__recall",
-            "mcp__notion__search",
-            "mcp__linear__search_issues",
-            "mcp__github__search_code",
-          ],
-          index,
-        ),
-        accounts: ["boop_demo"],
+        logType: "tool_result",
+        toolName: contextTool,
+        accounts: ["boop_memory_demo"],
         content: JSON.stringify({
           successful: true,
-          memories: [
-            "User prefers concise summaries grouped by owner.",
-            "Dashboard should use compact rounded panels and realistic operational data.",
-          ],
+          data: {
+            results:
+              "Recalled: keep drafts pending for approval; lead with the recommended action; protect the 90-minute writing block; group launch blockers by owner.",
+          },
+        }),
+      },
+      ...delegationRows,
+      {
+        logType: "tool_use" as const,
+        toolName: template.tool,
+        accounts: [primaryAccount],
+        content: JSON.stringify({
+          query: template.query,
+          limit: 10,
+          account: primaryAccount,
+        }),
+      },
+      {
+        logType: "tool_result" as const,
+        toolName: template.tool,
+        accounts: [primaryAccount],
+        content: JSON.stringify({
+          successful: status !== "failed",
+          data: {
+            results: demoToolResultText(template, primaryIntegration, status),
+          },
+          source: primaryIntegration,
+        }),
+      },
+      {
+        logType: "tool_use" as const,
+        toolName: secondaryTool,
+        accounts: [secondaryAccount],
+        content: JSON.stringify({
+          query: template.task,
+          limit: 5,
+          account: secondaryAccount,
+        }),
+      },
+      {
+        logType: "tool_result" as const,
+        toolName: secondaryTool,
+        accounts: [secondaryAccount],
+        content: JSON.stringify({
+          successful: true,
+          data: {
+            results: demoToolResultText(template, secondaryIntegration, "completed"),
+          },
+          source: secondaryIntegration,
         }),
       },
       {
@@ -973,25 +1295,38 @@ async function seedMemories(ctx: MutationCtx, now: number) {
       importance: compactNumber(0.54 + (index % 8) * 0.045, 2),
     })),
   ];
+  const seededRows = Array.from({ length: 72 }, (_, index) => pick(rows, index));
+  const topics = seededRows.map((row) => demoMemoryTopic(row));
+  const memoryIdsByTopic = new Map<DemoMemoryTopic, string[]>();
+  topics.forEach((topic, index) => {
+    const memoryIds = memoryIdsByTopic.get(topic) ?? [];
+    memoryIds.push(`demo:mem:${String(index + 1).padStart(3, "0")}`);
+    memoryIdsByTopic.set(topic, memoryIds);
+  });
 
   let memories = 0;
-  for (let index = 0; index < 72; index += 1) {
-    const row = pick(rows, index);
+  for (let index = 0; index < seededRows.length; index += 1) {
+    const row = seededRows[index]!;
+    const topic = topics[index]!;
+    const topicMemoryIds = memoryIdsByTopic.get(topic) ?? [];
+    const topicIndex = topicMemoryIds.indexOf(`demo:mem:${String(index + 1).padStart(3, "0")}`);
+    const relatedMemoryIds = [
+      topicMemoryIds[topicIndex - 1],
+      topicMemoryIds[topicIndex + 1],
+    ].filter((memoryId): memoryId is string => Boolean(memoryId));
     const lifecycle = index % 23 === 0 ? "archived" : index % 31 === 0 ? "pruned" : "active";
     await ctx.db.insert("memoryRecords", {
       memoryId: `demo:mem:${String(index + 1).padStart(3, "0")}`,
-      content:
-        index < rows.length
-          ? row.content
-          : `${row.content} Demo variation ${index - rows.length + 1} with a different source turn and access pattern.`,
+      content: row.content,
       tier: row.tier,
       segment: row.segment,
       importance: row.importance,
       decayRate: compactNumber(0.01 + (index % 7) * 0.006, 3),
       accessCount: (index * 7) % 29,
       lastAccessedAt: ago(now, index % 10, (index % 6) * 33 * MINUTE),
-      sourceTurn: `demo:turn:${index % conversationSeeds.length}-${index % 8}`,
+      sourceTurn: `demo:turn:${topic}:${index % 4}`,
       lifecycle,
+      embedding: demoEmbedding(row.content),
       supersedes:
         index % 17 === 0 && index > 0
           ? [`demo:mem:${String(index).padStart(3, "0")}`]
@@ -1000,6 +1335,11 @@ async function seedMemories(ctx: MutationCtx, now: number) {
         demo: true,
         confidence: compactNumber(0.72 + (index % 9) * 0.025, 2),
         source: pick(["iMessage", "Gmail", "Calendar", "Linear", "Consolidation"], index),
+        graph: {
+          topic,
+          label: demoMemoryGraphLabel(row),
+          relatedMemoryIds,
+        },
       }),
       createdAt: ago(now, Math.floor(index / 6), (index % 6) * 41 * MINUTE),
     });
@@ -1019,29 +1359,26 @@ async function seedMemoryEvents(ctx: MutationCtx, now: number) {
     "consolidation.proposed",
     "consolidation.applied",
   ];
+  const eventCopy = [
+    "Extracted a scheduling preference from the product-review thread.",
+    "Recalled launch-week blockers for the command-center agent.",
+    "Wrote a short-term reminder for the package pickup cutoff.",
+    "Promoted the draft-approval rule after repeated confirmations.",
+    "Merged duplicate memories about customer escalation reply tone.",
+    "Pruned an expired calendar hold after the meeting window passed.",
+    "Proposed consolidation of overlapping launch checklist memories.",
+    "Applied memory cleanup and preserved source-linked evidence.",
+  ];
   let memoryEvents = 0;
   for (let index = 0; index < 128; index += 1) {
     const memoryId = `demo:mem:${String((index % 72) + 1).padStart(3, "0")}`;
+    const eventType = pick(eventTypes, index);
     await ctx.db.insert("memoryEvents", {
-      eventType: pick(eventTypes, index),
+      eventType,
       conversationId: pick(conversationSeeds, index).id,
       memoryId,
       agentId: `demo:agent:${String((index % agentTemplates.length) + 1).padStart(2, "0")}`,
-      data: JSON.stringify({
-        demo: true,
-        memoryId,
-        reason: pick(
-          [
-            "Matched scheduling preference",
-            "Deduplicated similar project facts",
-            "Promoted durable product preference",
-            "Recalled for launch-week context",
-            "Pruned short-lived calendar detail",
-          ],
-          index,
-        ),
-        score: compactNumber(0.61 + (index % 20) * 0.017, 3),
-      }),
+      data: `${pick(eventCopy, index)} Score ${compactNumber(0.61 + (index % 20) * 0.017, 3)}.`,
       createdAt: ago(now, Math.floor(index / 10), (index % 10) * 17 * MINUTE),
     });
     memoryEvents += 1;
@@ -1240,7 +1577,7 @@ export const status = query({
       seeded: total > 0,
       counts,
       total,
-      scanLimit: SCAN_LIMIT,
+      scanLimit: DEMO_SCAN_LIMIT,
     };
   },
 });

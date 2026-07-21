@@ -1,7 +1,8 @@
-import { action, mutation, query } from "./_generated/server";
+import { action, mutation, query, type QueryCtx } from "./_generated/server";
 import { v } from "convex/values";
 import { api } from "./_generated/api";
-import type { Id } from "./_generated/dataModel";
+import type { Doc, Id } from "./_generated/dataModel";
+import { DEMO_SCAN_LIMIT, isDemoId, isDemoModeEnabled } from "./demoMode";
 
 const tierV = v.union(v.literal("short"), v.literal("long"), v.literal("permanent"));
 const segmentV = v.union(
@@ -14,6 +15,17 @@ const segmentV = v.union(
   v.literal("context"),
 );
 const lifecycleV = v.union(v.literal("active"), v.literal("archived"), v.literal("pruned"));
+
+type MemoryTier = "short" | "long" | "permanent";
+type MemorySegment =
+  | "identity"
+  | "preference"
+  | "correction"
+  | "relationship"
+  | "project"
+  | "knowledge"
+  | "context";
+type MemoryLifecycle = "active" | "archived" | "pruned";
 
 export const upsert = mutation({
   args: {
@@ -94,7 +106,7 @@ export const getByIds = query({
     const out = [];
     for (const id of args.ids) {
       const r = await ctx.db.get(id);
-      if (r) out.push(r);
+      if (r && !isDemoId(r.memoryId)) out.push(r);
     }
     return out;
   },
@@ -102,41 +114,81 @@ export const getByIds = query({
 
 export const vectorSearch = action({
   args: { embedding: v.array(v.float64()), limit: v.optional(v.number()) },
-  handler: async (ctx, args): Promise<Array<{ _id: Id<"memoryRecords">; score: number; record: any }>> => {
+  handler: async (
+    ctx,
+    args,
+  ): Promise<
+    Array<{ _id: Id<"memoryRecords">; score: number; record: Doc<"memoryRecords"> }>
+  > => {
+    const limit = Math.max(1, Math.min(args.limit ?? 20, 256));
     const results = await ctx.vectorSearch("memoryRecords", "by_embedding", {
       vector: args.embedding,
-      limit: args.limit ?? 20,
+      // Demo vectors share the same index. Oversample enough to filter them
+      // without allowing seeded showcase data into real memory recall.
+      limit: Math.min(256, limit + 100),
       filter: (q) => q.eq("lifecycle", "active"),
     });
     const records = await ctx.runQuery(api.memoryRecords.getByIds, {
       ids: results.map((r) => r._id),
     });
-    const byId = new Map(records.map((r: any) => [r._id, r]));
+    const byId = new Map(records.map((record) => [record._id, record]));
     return results
       .map((r) => ({ _id: r._id, score: r._score, record: byId.get(r._id) }))
-      .filter((r) => r.record);
+      .filter(
+        (result): result is {
+          _id: Id<"memoryRecords">;
+          score: number;
+          record: Doc<"memoryRecords">;
+        } => Boolean(result.record),
+      )
+      .slice(0, limit);
   },
 });
 
+type MemoryListArgs = {
+  tier?: MemoryTier;
+  segment?: MemorySegment;
+  lifecycle?: MemoryLifecycle;
+  limit?: number;
+};
+
+async function readMemories(ctx: QueryCtx, args: MemoryListArgs, demoOnly: boolean) {
+  const limit = args.limit ?? 100;
+  const results = args.tier
+    ? await ctx.db
+        .query("memoryRecords")
+        .withIndex("by_tier", (q) => q.eq("tier", args.tier!))
+        .order("desc")
+        .take(DEMO_SCAN_LIMIT)
+    : args.segment
+      ? await ctx.db
+          .query("memoryRecords")
+          .withIndex("by_segment", (q) => q.eq("segment", args.segment!))
+          .order("desc")
+          .take(DEMO_SCAN_LIMIT)
+      : await ctx.db.query("memoryRecords").order("desc").take(DEMO_SCAN_LIMIT);
+  const lifecycle = args.lifecycle ?? "active";
+  return results
+    .filter((record) => isDemoId(record.memoryId) === demoOnly && record.lifecycle === lifecycle)
+    .slice(0, limit);
+}
+
+const listArgs = {
+  tier: v.optional(tierV),
+  segment: v.optional(segmentV),
+  lifecycle: v.optional(lifecycleV),
+  limit: v.optional(v.number()),
+};
+
 export const list = query({
-  args: {
-    tier: v.optional(tierV),
-    segment: v.optional(segmentV),
-    lifecycle: v.optional(lifecycleV),
-    limit: v.optional(v.number()),
-  },
+  args: listArgs,
+  handler: async (ctx, args) => readMemories(ctx, args, false),
+});
+
+export const listForDashboard = query({
+  args: listArgs,
   handler: async (ctx, args) => {
-    const limit = args.limit ?? 100;
-    let results;
-    if (args.tier) {
-      results = await ctx.db.query("memoryRecords").withIndex("by_tier", (q) => q.eq("tier", args.tier!)).order("desc").take(limit * 2);
-    } else if (args.segment) {
-      results = await ctx.db.query("memoryRecords").withIndex("by_segment", (q) => q.eq("segment", args.segment!)).order("desc").take(limit * 2);
-    } else {
-      results = await ctx.db.query("memoryRecords").order("desc").take(limit * 2);
-    }
-    const lifecycle = args.lifecycle ?? "active";
-    return results.filter((r) => r.lifecycle === lifecycle).slice(0, limit);
+    return readMemories(ctx, args, await isDemoModeEnabled(ctx));
   },
 });
 
@@ -156,7 +208,7 @@ export const search = query({
       .order("desc")
       .take(500);
     return active
-      .filter((m) => m.content.toLowerCase().includes(q))
+      .filter((m) => !isDemoId(m.memoryId) && m.content.toLowerCase().includes(q))
       .sort((a, b) => b.importance - a.importance)
       .slice(0, limit);
   },
@@ -191,16 +243,41 @@ export const setLifecycle = mutation({
   },
 });
 
+export const remove = mutation({
+  args: { memoryId: v.string() },
+  handler: async (ctx, args) => {
+    const mem = await ctx.db
+      .query("memoryRecords")
+      .withIndex("by_memory_id", (q) => q.eq("memoryId", args.memoryId))
+      .unique();
+    if (!mem) return null;
+    await ctx.db.delete(mem._id);
+    await ctx.db.insert("memoryEvents", {
+      eventType: "memory.deleted",
+      memoryId: args.memoryId,
+      data: JSON.stringify({
+        tier: mem.tier,
+        segment: mem.segment,
+        lifecycle: mem.lifecycle,
+      }),
+      createdAt: Date.now(),
+    });
+    return mem._id;
+  },
+});
+
 const COUNTS_SCAN_LIMIT = 5000;
 
 export const embeddingStats = query({
   args: {},
   handler: async (ctx) => {
-    const all = await ctx.db
+    let all = await ctx.db
       .query("memoryRecords")
       .withIndex("by_lifecycle", (q) => q.eq("lifecycle", "active"))
       .order("desc")
       .take(COUNTS_SCAN_LIMIT);
+    const scanned = all.length;
+    all = all.filter((memory) => !isDemoId(memory.memoryId));
     let withEmbedding = 0;
     let withoutEmbedding = 0;
     for (const m of all) {
@@ -211,7 +288,7 @@ export const embeddingStats = query({
       total: all.length,
       withEmbedding,
       withoutEmbedding,
-      truncated: all.length === COUNTS_SCAN_LIMIT,
+      truncated: scanned === COUNTS_SCAN_LIMIT,
     };
   },
 });
@@ -244,7 +321,7 @@ export const listUnembeddedPage = query({
       });
     return {
       page: result.page
-        .filter((m) => !m.embedding || m.embedding.length === 0)
+        .filter((m) => !isDemoId(m.memoryId) && (!m.embedding || m.embedding.length === 0))
         .map((m) => ({ memoryId: m.memoryId, content: m.content })),
       isDone: result.isDone,
       continueCursor: result.continueCursor,
@@ -274,7 +351,9 @@ export const setEmbedding = mutation({
 export const countsByTier = query({
   args: {},
   handler: async (ctx) => {
-    const all = await ctx.db.query("memoryRecords").order("desc").take(COUNTS_SCAN_LIMIT);
+    const demoMode = await isDemoModeEnabled(ctx);
+    const rows = await ctx.db.query("memoryRecords").order("desc").take(COUNTS_SCAN_LIMIT);
+    const all = rows.filter((m) => isDemoId(m.memoryId) === demoMode);
     const active = all.filter((m) => m.lifecycle === "active");
     return {
       short: active.filter((m) => m.tier === "short").length,
@@ -282,7 +361,7 @@ export const countsByTier = query({
       permanent: active.filter((m) => m.tier === "permanent").length,
       archived: all.filter((m) => m.lifecycle === "archived").length,
       pruned: all.filter((m) => m.lifecycle === "pruned").length,
-      truncated: all.length === COUNTS_SCAN_LIMIT,
+      truncated: rows.length === COUNTS_SCAN_LIMIT,
       scanLimit: COUNTS_SCAN_LIMIT,
     };
   },

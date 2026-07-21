@@ -4,17 +4,26 @@
  * Convex vector index stays compatible regardless of which provider runs.
  *
  * Local fallback ensures `recall()` always works — no API key required.
- * First local call downloads ~440MB and caches in ~/.cache/huggingface.
+ * First local call downloads ~1.3GB and caches under Boop's local data folder.
  */
 
 import type { FeatureExtractionPipeline } from "@huggingface/transformers";
+import { mkdir } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const VOYAGE_MODEL = "voyage-3";
 const OPENAI_MODEL = "text-embedding-3-large";
 const LOCAL_MODEL = "Xenova/bge-large-en-v1.5";
 const DIMENSIONS = 1024;
+const LOCAL_CACHE_DIR = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "data",
+  "huggingface-cache",
+);
 
-// Local pipeline is loaded lazily (model download is ~440MB) and cached
+// Local pipeline is loaded lazily (model download is ~1.3GB) and cached
 // in-process. `loading` dedupes parallel callers during the first load.
 let extractor: FeatureExtractionPipeline | null = null;
 let loading: Promise<FeatureExtractionPipeline> | null = null;
@@ -73,8 +82,10 @@ async function getLocalExtractor(): Promise<FeatureExtractionPipeline> {
   if (extractor) return extractor;
   if (loading) return loading;
   const attempt = (async () => {
-    const { pipeline } = await import("@huggingface/transformers");
-    console.log(`[embeddings] loading local model ${LOCAL_MODEL} (~440MB on first run)…`);
+    const { env, pipeline } = await import("@huggingface/transformers");
+    await mkdir(LOCAL_CACHE_DIR, { recursive: true });
+    env.cacheDir = LOCAL_CACHE_DIR;
+    console.log(`[embeddings] loading local model ${LOCAL_MODEL} (~1.3GB on first run)…`);
     const start = Date.now();
     const ext = await pipeline("feature-extraction", LOCAL_MODEL, {
       dtype: "fp32",
@@ -84,7 +95,7 @@ async function getLocalExtractor(): Promise<FeatureExtractionPipeline> {
     return ext;
   })();
   loading = attempt;
-  // If the load rejects (transient network failure during the 440MB
+  // If the load rejects (transient network failure during the model
   // download, etc.) we MUST clear `loading` so the next call re-attempts
   // instead of replaying the cached rejection forever. Detach the cleanup
   // from the returned promise via .catch(() => {}) so callers see the

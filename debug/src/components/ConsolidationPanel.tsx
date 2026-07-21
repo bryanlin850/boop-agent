@@ -80,7 +80,7 @@ function timeAgo(ts?: number): string {
 }
 
 export function ConsolidationPanel({ isDark }: { isDark: boolean }) {
-  const runs = useQuery(api.consolidation.listRuns, { limit: 50 });
+  const runs = useQuery(api.consolidation.listRunsForDashboard, { limit: 50 });
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [livePhases, setLivePhases] = useState<Record<string, LivePhase[]>>({});
   const [triggering, setTriggering] = useState(false);
@@ -272,7 +272,7 @@ function ConsolidationDetail({
   onBack: () => void;
   isDark: boolean;
 }) {
-  const runs = useQuery(api.consolidation.listRuns, { limit: 80 });
+  const runs = useQuery(api.consolidation.listRunsForDashboard, { limit: 80 });
   const run = runs?.find((r: any) => r.runId === runId);
   const [allPhases, setAllPhases] = useState<LivePhase[]>(phases);
 

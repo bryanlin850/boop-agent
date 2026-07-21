@@ -32,6 +32,7 @@ import {
   createPatchrightBrowserMcp,
   patchrightBrowserAvailable,
 } from "./patchright-browser.js";
+import { redactPhoneNumbers } from "./privacy.js";
 
 // TODO: source `timezone` per-user (memory entry or `conversations.timezone` field) instead of an env default.
 function buildInteractionSystem(opts: {
@@ -171,6 +172,14 @@ When relaying a sub-agent's answer:
 - You may tighten the body for iMessage (shorter bullets, fewer emojis),
   but the URLs are ground truth — don't touch them.
 
+Phone-number privacy:
+- Never include phone numbers in user-facing replies, even if a tool or
+  sub-agent includes one.
+- For iMessage/SMS lookups, identify threads by contact name, message text,
+  timing, or "the matching thread" instead of by phone number.
+- If the user provides a phone number, you may use it to search, but do not
+  echo it back.
+
 Scheduling and automations:
 When the user wants something to happen on a recurring schedule — daily,
 weekly, before/after some recurring event, anything that should fire more
@@ -259,7 +268,7 @@ COMPOSIO_SEARCH_TOOLS and will return the real tool list. Never describe
 integration capabilities from training-data knowledge of the product.
 
 Local browser fallback:
-The optional "browser" integration is a local Patchright Chrome profile. It is
+The optional "browser" integration is a local Patchright Chrome/Chromium profile. It is
 available only when the user has enabled Local browser use in Settings. Force
 ["browser"] only for explicit local-browser intent: "local browser", "local
 Chrome", "Patchright", "browser integration", "Chrome instance", or a
@@ -268,7 +277,28 @@ If "browser" is not available, tell the user to turn on Local browser use in
 Settings. Otherwise, prefer native integrations when they fit. Use browser for
 login-only services, sites with no native toolkit, visual workflows, JS-heavy
 apps, or sites that are likely to detect bots. If the user must log in, the
-sub-agent can open a visible Chrome handoff window with browser_request_login.
+sub-agent can open a visible local browser handoff window with browser_request_login.
+
+Travel, reservations, and receipts:
+Flight, airport, boarding pass, itinerary, hotel, restaurant, ticket, order,
+receipt, reservation, and lounge details usually live in email. When "gmail" is
+available for those asks, include it in spawn_agent even if Apple data may also
+help. If "apple" is also relevant, use ["gmail", "apple"] instead of
+Apple-only. Only skip Gmail when the user explicitly asks for local Apple data
+only or no email.
+
+Apple data (local, read-only):
+The optional "apple" integration reads iMessage texts, Apple Calendar events,
+Apple Reminders, and Apple Notes from the user's Mac. iMessage reads run from
+the local server with Full Disk Access; Apple Notes and Apple Reminders read
+from the local server with macOS Automation permission; Calendar uses the
+optional Apple bridge.
+When "apple" is available and the user asks about their texts/iMessages,
+calendar, reminders, or notes, spawn_agent with integrations ["apple"]. If it
+is not available, tell the user to enable Apple data in Settings. For iMessage,
+the app or process running Boop needs Full Disk Access on macOS. For
+Apple Notes or Reminders, macOS may ask for permission to let that app control
+the relevant Apple app.
 
 Self-inspection (no spawn needed — answer instantly):
 When the user asks about Boop itself, pick the tool by intent:
@@ -525,7 +555,7 @@ export async function handleUserMessage(opts: HandleOpts): Promise<HandleResult>
   }
 
   const sendAck = async (message: string): Promise<void> => {
-    const text = message.trim();
+    const text = redactPhoneNumbers(message.trim());
     if (!text) return;
     // Skip the iMessage send for proactive turns — those go out as a
     // single self-contained notice from dispatchProactiveNotice. If the
@@ -657,7 +687,7 @@ export async function handleUserMessage(opts: HandleOpts): Promise<HandleResult>
           runtimeConfig,
           imageStorageIds,
         });
-        return runtimeText(`[agent ${res.agentId} ${res.status}]\n\n${res.result}`);
+        return runtimeText(`[agent ${res.agentId} ${res.status}]\n\n${redactPhoneNumbers(res.result)}`);
       },
     ),
   ];
@@ -745,7 +775,7 @@ export async function handleUserMessage(opts: HandleOpts): Promise<HandleResult>
   // "(no reply)" instead of composing a real reply — usually after a tool
   // call cycle where it lost the thread of what to say. Treat those as
   // empty so the user gets a real fallback they can act on.
-  reply = reply.trim();
+  reply = redactPhoneNumbers(reply.trim());
   // Match "(no output)" / "no reply." / "(No Response)" etc. Parens are
   // matched as a balanced pair (or omitted) — alternation prevents `(no
   // output` or `no output)` with one stray paren from sneaking through.

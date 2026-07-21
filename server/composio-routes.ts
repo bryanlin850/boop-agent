@@ -23,8 +23,9 @@ export function createComposioRouter(): express.Router {
     res.json({ enabled: Boolean(getComposio()) });
   });
 
-  router.get("/toolkits", async (_req, res) => {
+  router.get("/toolkits", async (req, res) => {
     try {
+      const includeCatalog = req.query.catalog === "all";
       const [connected, configured, meta] = await Promise.all([
         listConnectedToolkits(),
         listToolkitSlugsWithAuthConfig(),
@@ -68,9 +69,19 @@ export function createComposioRouter(): express.Router {
         };
       });
 
-      const extras = [...connectionsBySlug.entries()]
-        .filter(([slug]) => !CURATED_TOOLKITS.some((t) => t.slug === slug))
-        .map(([slug, conns]) => {
+      const curatedSlugs = new Set(CURATED_TOOLKITS.map((t) => t.slug));
+      const extraSlugs = includeCatalog
+        ? [...meta.keys()].filter((slug) => !curatedSlugs.has(slug))
+        : [...connectionsBySlug.keys()].filter((slug) => !curatedSlugs.has(slug));
+
+      const extras = extraSlugs
+        .sort((a, b) => {
+          const aName = meta.get(a)?.name ?? displayNameFor(a);
+          const bName = meta.get(b)?.name ?? displayNameFor(b);
+          return aName.localeCompare(bName);
+        })
+        .map((slug) => {
+          const conns = connectionsBySlug.get(slug) ?? [];
           const m = meta.get(slug);
           // Non-curated toolkit — we don't actually know its auth mode from
           // here. Infer: if an auth config exists on this account, the user

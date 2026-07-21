@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useQuery, useMutation } from "convex/react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { Copy01Icon, Message01Icon } from "@hugeicons/core-free-icons";
 import { api } from "../../../convex/_generated/api.js";
 import {
   RuntimeProviderBadge,
   RuntimeProviderLogo,
   type RuntimeProvider,
 } from "../lib/branding.js";
+import { AppleSection } from "./AppleSection.js";
 import { BrowserSection } from "./BrowserSection.js";
 
 type RuntimeChoice = "claude" | "codex";
@@ -21,6 +24,11 @@ interface RuntimeConfigSnapshot {
   model: string;
   reasoningEffort?: ReasoningEffort;
   billingMode: "api" | "codex-subscription";
+}
+
+interface ConnectionConfigSnapshot {
+  phoneNumber: string;
+  publicUrl?: string;
 }
 
 interface ToggleSetting {
@@ -272,11 +280,12 @@ const ADMIN_SECTIONS: AdminSection[] = [
   },
 ];
 
-// Runtime row + main SETTINGS list + BrowserSection card + DemoMode row.
+// Text Boop, runtime, primary settings, Browser, Apple, Demo, and admin controls.
 const RUNTIME_SETTING_COUNT =
   SETTINGS.length +
-  2 +
+  5 +
   ADMIN_SECTIONS.reduce((n, s) => n + s.settings.length, 0);
+const DEMO_PHONE_NUMBER = "+11111111111";
 
 const RUNTIME_OPTIONS: Option<RuntimeChoice>[] = [
   { value: "claude", label: "Claude" },
@@ -358,7 +367,13 @@ async function updateRuntimeConfig(
   return (await res.json()) as RuntimeConfigSnapshot;
 }
 
-export function SettingsPanel({ isDark }: { isDark: boolean }) {
+export function SettingsPanel({
+  isDark,
+  desktopPhoneNumber,
+}: {
+  isDark: boolean;
+  desktopPhoneNumber?: string;
+}) {
   return (
     <div className="mx-auto max-w-[880px] space-y-5 pb-10">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
@@ -396,11 +411,13 @@ export function SettingsPanel({ isDark }: { isDark: boolean }) {
       </div>
 
       <div className="space-y-3">
+        <TextBoopRow isDark={isDark} desktopPhoneNumber={desktopPhoneNumber} />
         <RuntimeRow isDark={isDark} />
         {SETTINGS.map((s) => (
           <SettingRow key={s.key} setting={s} isDark={isDark} />
         ))}
         <BrowserSection isDark={isDark} />
+        <AppleSection isDark={isDark} />
         <DemoModeRow isDark={isDark} />
       </div>
 
@@ -452,16 +469,23 @@ function SettingRow({ setting, isDark }: { setting: Setting; isDark: boolean }) 
   }
 }
 
-function SettingsRuntimeBadge({ isDark }: { isDark: boolean }) {
-  const storedRuntime = useQuery(api.settings.get, { key: "runtime" });
-  const [serverConfig, setServerConfig] = useState<RuntimeConfigSnapshot | null>(null);
+function TextBoopRow({
+  isDark,
+  desktopPhoneNumber,
+}: {
+  isDark: boolean;
+  desktopPhoneNumber?: string;
+}) {
+  const demoStatus = useQuery(api.demo.status);
+  const [serverConfig, setServerConfig] = useState<ConnectionConfigSnapshot | null>(null);
+  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
-    fetch("/api/runtime-config")
+    fetch("/api/connection-config")
       .then((res) => {
-        if (!res.ok) throw new Error(`Runtime config fetch failed (${res.status})`);
-        return res.json() as Promise<RuntimeConfigSnapshot>;
+        if (!res.ok) throw new Error(`Connection config fetch failed (${res.status})`);
+        return res.json() as Promise<ConnectionConfigSnapshot>;
       })
       .then((config) => {
         if (!cancelled) setServerConfig(config);
@@ -472,14 +496,140 @@ function SettingsRuntimeBadge({ isDark }: { isDark: boolean }) {
     return () => {
       cancelled = true;
     };
+  }, [desktopPhoneNumber]);
+
+  const demoModeEnabled = demoStatus?.enabled ?? false;
+  const realPhoneNumber = desktopPhoneNumber || serverConfig?.phoneNumber || "";
+  const phoneNumber = demoModeEnabled ? DEMO_PHONE_NUMBER : realPhoneNumber;
+  const configured = Boolean(phoneNumber);
+  const debugLine = demoModeEnabled
+    ? "sendblue.from_number = demo placeholder"
+    : configured
+      ? `sendblue.from_number = "${phoneNumber}"`
+      : "sendblue.from_number = (not configured)";
+
+  async function copyNumber() {
+    if (!phoneNumber) return;
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(phoneNumber);
+    } else {
+      const input = document.createElement("textarea");
+      input.value = phoneNumber;
+      input.setAttribute("readonly", "");
+      input.style.position = "fixed";
+      input.style.opacity = "0";
+      document.body.appendChild(input);
+      input.select();
+      document.execCommand("copy");
+      document.body.removeChild(input);
+    }
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1400);
+  }
+
+  const numberTone = configured
+    ? isDark
+      ? "border-emerald-400/20 bg-emerald-400/10 text-emerald-200"
+      : "border-emerald-200 bg-emerald-50 text-emerald-800"
+    : isDark
+      ? "border-amber-400/20 bg-amber-400/10 text-amber-200"
+      : "border-amber-200 bg-amber-50 text-amber-800";
+  const copyButtonTone = isDark
+    ? "border-white/10 bg-white/5 text-zinc-200 hover:bg-white/10"
+    : "border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50";
+
+  return (
+    <SettingShell
+      label="Text Boop"
+      description={
+        demoModeEnabled
+          ? "Demo mode is hiding the real Sendblue number and showing a placeholder instead."
+          : "Text or iMessage this Sendblue number to talk to Boop. Message it from a different phone; it is the number people text TO, not your personal cell."
+      }
+      debugLine={debugLine}
+      isDark={isDark}
+      control={
+        <div className="flex w-full flex-col items-end gap-2 lg:min-w-[390px]">
+          <div className="flex w-full items-center gap-2">
+            <div
+              className={`flex min-w-0 flex-1 items-center gap-2 rounded-2xl border px-3 py-2 ${numberTone}`}
+            >
+              <HugeiconsIcon icon={Message01Icon} size={16} className="shrink-0" />
+              <div className="min-w-0">
+                <div className="text-[11px] font-medium opacity-75">
+                  Text / iMessage this number
+                </div>
+                <div className="truncate mono text-sm font-semibold">
+                  {configured ? phoneNumber : "Not configured"}
+                </div>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={copyNumber}
+              disabled={!configured}
+              className={`inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border disabled:opacity-45 ${copyButtonTone}`}
+              aria-label="Copy number to iMessage"
+              title={copied ? "Copied" : "Copy number"}
+            >
+              <HugeiconsIcon icon={Copy01Icon} size={16} />
+            </button>
+          </div>
+          <div className={`text-[11px] ${isDark ? "text-zinc-500" : "text-zinc-500"}`}>
+            {configured
+              ? demoModeEnabled
+                ? copied
+                  ? "Copied demo placeholder."
+                  : "Demo mode is hiding the real number."
+                : copied
+                  ? "Copied."
+                  : "Use this as the recipient in Messages."
+              : "Run setup again or sync Sendblue to configure the receiving number."}
+          </div>
+        </div>
+      }
+    />
+  );
+}
+
+function SettingsRuntimeBadge({ isDark }: { isDark: boolean }) {
+  const storedRuntime = useQuery(api.settings.get, { key: "runtime" });
+  const [serverConfig, setServerConfig] = useState<RuntimeConfigSnapshot | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    let timeout: number | undefined;
+    let attempt = 0;
+
+    async function loadRuntimeConfig() {
+      try {
+        const res = await fetch("/api/runtime-config", { cache: "no-store" });
+        if (!res.ok) throw new Error(`Runtime config fetch failed (${res.status})`);
+        const config = (await res.json()) as RuntimeConfigSnapshot;
+        if (!cancelled) setServerConfig(config);
+      } catch {
+        if (cancelled) return;
+        setServerConfig(null);
+        if (attempt < 20) {
+          const delay = Math.min(750 + attempt * 250, 4000);
+          attempt += 1;
+          timeout = window.setTimeout(loadRuntimeConfig, delay);
+        }
+      }
+    }
+
+    loadRuntimeConfig();
+    return () => {
+      cancelled = true;
+      if (timeout) window.clearTimeout(timeout);
+    };
   }, [storedRuntime]);
 
-  const runtime: RuntimeProvider =
-    storedRuntime === "claude" || storedRuntime === "codex"
-      ? storedRuntime
-      : serverConfig?.runtime ?? "claude";
+  const runtime: RuntimeProvider | null =
+    serverConfig?.runtime ??
+    (storedRuntime === "claude" || storedRuntime === "codex" ? storedRuntime : null);
 
-  if (storedRuntime === undefined && serverConfig === null) return null;
+  if (!runtime) return null;
 
   return (
     <RuntimeProviderBadge
@@ -503,7 +653,7 @@ function DemoModeRow({ isDark }: { isDark: boolean }) {
   const counts = status?.counts;
   const rowCount = status?.total ?? 0;
   const summary = counts
-    ? `${counts.agents} agents / ${counts.agentLogs} logs / ${counts.memories} memories / ${counts.automationRuns} automation runs`
+    ? `${counts.agents} agents + sub-agents / ${counts.agentLogs} tool logs / ${counts.memories} memories / ${counts.automationRuns} automation runs`
     : "Preparing demo dataset status";
   const debugLine = loading
     ? "settings.debug_demo_mode = ..."
@@ -552,7 +702,7 @@ function DemoModeRow({ isDark }: { isDark: boolean }) {
   return (
     <SettingShell
       label="Demo mode"
-      description="Seeds realistic namespaced records across agents, tool traces, memories, memory events, automations, conversations, consolidation, and usage so every dashboard screen has data to inspect."
+      description="Seeds realistic namespaced records across agents, sub-agents, tool traces, memories, memory events, automations, conversations, consolidation, usage, and demo connection catalogs so every dashboard screen has data to inspect."
       debugLine={debugLine}
       isDark={isDark}
       control={
@@ -682,36 +832,46 @@ function RuntimeRow({ isDark }: { isDark: boolean }) {
   const [error, setError] = useState<string | null>(null);
 
   const refreshServerConfig = useCallback(async () => {
-    const res = await fetch("/api/runtime-config");
+    const res = await fetch("/api/runtime-config", { cache: "no-store" });
     if (!res.ok) throw new Error(`Runtime config fetch failed (${res.status})`);
     setServerConfig((await res.json()) as RuntimeConfigSnapshot);
   }, []);
 
   useEffect(() => {
     let cancelled = false;
-    fetch("/api/runtime-config")
-      .then((res) => {
+    let timeout: number | undefined;
+    let attempt = 0;
+
+    async function loadRuntimeConfig() {
+      try {
+        const res = await fetch("/api/runtime-config", { cache: "no-store" });
         if (!res.ok) throw new Error(`Runtime config fetch failed (${res.status})`);
-        return res.json() as Promise<RuntimeConfigSnapshot>;
-      })
-      .then((config) => {
+        const config = (await res.json()) as RuntimeConfigSnapshot;
         if (!cancelled) {
           setServerConfig(config);
           setError(null);
         }
-      })
-      .catch((err) => {
-        if (!cancelled) setError(String(err));
-      });
+      } catch (err) {
+        if (cancelled) return;
+        setError(String(err));
+        if (attempt < 20) {
+          const delay = Math.min(750 + attempt * 250, 4000);
+          attempt += 1;
+          timeout = window.setTimeout(loadRuntimeConfig, delay);
+        }
+      }
+    }
+
+    loadRuntimeConfig();
     return () => {
       cancelled = true;
+      if (timeout) window.clearTimeout(timeout);
     };
   }, [refreshServerConfig, storedRuntime, storedClaudeModel, storedHostedModel, storedHostedEffort]);
 
   const runtime: RuntimeChoice =
-    storedRuntime === "claude" || storedRuntime === "codex"
-      ? storedRuntime
-      : serverConfig?.runtime ?? "claude";
+    serverConfig?.runtime ??
+    (storedRuntime === "claude" || storedRuntime === "codex" ? storedRuntime : "claude");
 
   const activeModelOptions = runtime === "codex" ? CODEX_MODELS : CLAUDE_MODELS;
   const modelKey = runtime === "codex" ? "codex_model" : "model";

@@ -1,4 +1,5 @@
 import { Composio } from "@composio/core";
+import { Composio as ComposioApiClient } from "@composio/client";
 import { ClaudeAgentSDKProvider } from "@composio/claude-agent-sdk";
 import { createSdkMcpServer, type McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-sdk";
 import type { IntegrationModule } from "./integrations/registry.js";
@@ -106,30 +107,67 @@ export interface ToolSummary {
   description?: string;
 }
 
+export interface ToolkitCatalogPage {
+  items: Array<{
+    slug: string;
+    name: string;
+    meta?: {
+      logo?: string | null;
+      description?: string | null;
+      tools_count?: number;
+    };
+  }>;
+  nextCursor?: string | null;
+}
+
+export async function collectToolkitCatalog(
+  fetchPage: (cursor?: string) => Promise<ToolkitCatalogPage>,
+): Promise<Map<string, ToolkitMeta>> {
+  const out = new Map<string, ToolkitMeta>();
+  const seenCursors = new Set<string>();
+  let cursor: string | undefined;
+
+  while (true) {
+    const page = await fetchPage(cursor);
+    for (const item of page.items) {
+      out.set(item.slug, {
+        slug: item.slug,
+        name: item.name,
+        logo: item.meta?.logo ?? undefined,
+        description: item.meta?.description ?? undefined,
+        toolsCount: item.meta?.tools_count,
+      });
+    }
+
+    const nextCursor = page.nextCursor ?? undefined;
+    if (!nextCursor) break;
+    if (seenCursors.has(nextCursor)) {
+      throw new Error("Composio toolkit catalog returned a repeated cursor");
+    }
+    seenCursors.add(nextCursor);
+    cursor = nextCursor;
+  }
+
+  return out;
+}
+
 // Composio's toolkit catalog rarely changes; cache the full list for the life of the process.
+const TOOLKIT_META_PAGE_LIMIT = 1000;
 let toolkitMetaCache: Promise<Map<string, ToolkitMeta>> | null = null;
 
 async function fetchAllToolkitMeta(): Promise<Map<string, ToolkitMeta>> {
   const composio = getComposio();
   if (!composio) return new Map();
-  const out = new Map<string, ToolkitMeta>();
-  const resp = await composio.toolkits.get({ limit: 500 });
-  const items = Array.isArray(resp)
-    ? resp
-    : ((resp as { items?: unknown[] }).items ?? []);
-  for (const it of items as Array<{
-    slug: string;
-    name: string;
-    meta?: { logo?: string; description?: string; toolsCount?: number };
-  }>) {
-    out.set(it.slug, {
-      slug: it.slug,
-      name: it.name,
-      logo: it.meta?.logo,
-      description: it.meta?.description,
-      toolsCount: it.meta?.toolsCount,
+  const apiKey = process.env.COMPOSIO_API_KEY!;
+  const catalogClient = new ComposioApiClient({ apiKey });
+  const out = await collectToolkitCatalog(async (cursor) => {
+    const page = await catalogClient.toolkits.list({
+      limit: TOOLKIT_META_PAGE_LIMIT,
+      sort_by: "alphabetically",
+      ...(cursor ? { cursor } : {}),
     });
-  }
+    return { items: page.items, nextCursor: page.next_cursor };
+  });
   // Backfill any curated toolkits the list endpoint omitted (e.g. MCP-only
   // toolkits like granola_mcp that don't appear in the paginated catalog).
   await Promise.all(

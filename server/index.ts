@@ -18,6 +18,7 @@ import { preloadLocalModel } from "./embeddings.js";
 import { createMemoryRouter } from "./memory-routes.js";
 import { listActiveSessions, resetAllProfiles } from "./patchright-browser.js";
 import { createBrowserRouter } from "./browser-routes.js";
+import { createAppleRouter } from "./apple-routes.js";
 import { closeLocalBrowser } from "./browser/launcher.js";
 import { createChangelogRouter } from "./changelog.js";
 import {
@@ -30,6 +31,7 @@ import {
   setRuntimeProvider,
 } from "./runtime-config.js";
 import { startImageCleanup } from "./images/clean.js";
+import { isPublicServerRequest, isTrustedLocalRequest } from "./local-access.js";
 
 async function main() {
   await loadIntegrations();
@@ -55,6 +57,13 @@ async function main() {
   }
 
   const app = express();
+  app.use((req, res, next) => {
+    if (isPublicServerRequest(req) || isTrustedLocalRequest(req)) {
+      next();
+      return;
+    }
+    res.status(404).json({ error: "not found" });
+  });
   app.use(cors());
   // Composio webhook receiver must read raw bytes for HMAC verification, so
   // its body parser is mounted BEFORE the global express.json. Without this
@@ -129,6 +138,7 @@ async function main() {
   app.use("/composio", createComposioRouter());
   app.use("/memory", createMemoryRouter());
   app.use("/browser", createBrowserRouter());
+  app.use("/apple", createAppleRouter());
   app.use("/changelog", createChangelogRouter());
 
   app.post("/agents/:id/cancel", (req, res) => {
@@ -194,7 +204,11 @@ async function main() {
 
   const server = createServer(app);
   const wss = new WebSocketServer({ server, path: "/ws" });
-  wss.on("connection", (ws) => {
+  wss.on("connection", (ws, request) => {
+    if (!isTrustedLocalRequest(request)) {
+      ws.close(1008, "local connections only");
+      return;
+    }
     addClient(ws);
     ws.send(JSON.stringify({ event: "hello", data: { ok: true }, at: Date.now() }));
   });

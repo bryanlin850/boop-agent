@@ -1,9 +1,35 @@
-import { defineConfig, loadEnv } from "vite";
+import { defineConfig, loadEnv, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import path from "node:path";
+import { isTrustedLocalRequest } from "../server/local-access.js";
 
 const PROJECT_ROOT = path.resolve(__dirname, "..");
+
+function localConnectionConfig(phoneNumber: string): Plugin {
+  return {
+    name: "boop-local-connection-config",
+    configureServer(server) {
+      server.middlewares.use((req, res, next) => {
+        const url = new URL(req.url ?? "/", "http://localhost");
+        if (req.method !== "GET" || url.pathname !== "/api/connection-config") {
+          next();
+          return;
+        }
+        if (!isTrustedLocalRequest(req)) {
+          res.statusCode = 404;
+          res.end("Not found");
+          return;
+        }
+        res.statusCode = 200;
+        res.setHeader("Content-Type", "application/json");
+        res.setHeader("Cache-Control", "no-store");
+        res.setHeader("X-Content-Type-Options", "nosniff");
+        res.end(JSON.stringify({ phoneNumber }));
+      });
+    },
+  };
+}
 
 export default defineConfig(({ mode }) => {
   // Load .env.local from the project root (not debug/) so we can read PORT
@@ -18,7 +44,11 @@ export default defineConfig(({ mode }) => {
   return {
     root: path.resolve(__dirname),
     envDir: PROJECT_ROOT,
-    plugins: [react(), tailwindcss()],
+    plugins: [
+      localConnectionConfig(env.SENDBLUE_FROM_NUMBER ?? ""),
+      react(),
+      tailwindcss(),
+    ],
     server: {
       port: 5173,
       ...(allowedHosts.length > 0 ? { allowedHosts } : {}),

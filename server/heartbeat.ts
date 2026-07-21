@@ -7,7 +7,10 @@ const STALE_MS = 15 * 60 * 1000;
 const ORPHANED_MS = 90 * 1000;
 
 export async function sweepStaleAgents(): Promise<void> {
-  const runningInDb = await convex.query(api.agents.list, { status: "running", limit: 100 });
+  const runningInDb = await convex.query(api.agents.list, {
+    status: "running",
+    limit: 100,
+  });
   const now = Date.now();
   const live = new Set(runningAgentIds());
 

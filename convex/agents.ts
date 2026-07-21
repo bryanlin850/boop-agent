@@ -1,5 +1,8 @@
-import { mutation, query } from "./_generated/server";
+import { mutation, query, type QueryCtx } from "./_generated/server";
 import { v } from "convex/values";
+import { DEMO_SCAN_LIMIT, isDemoId, isDemoModeEnabled } from "./demoMode";
+
+type AgentStatus = "spawned" | "running" | "completed" | "failed" | "cancelled";
 
 const statusV = v.union(
   v.literal("spawned"),
@@ -77,24 +80,44 @@ export const addLog = mutation({
   },
 });
 
-export const list = query({
-  args: { status: v.optional(statusV), limit: v.optional(v.number()) },
-  handler: async (ctx, args) => {
-    const limit = args.limit ?? 50;
-    if (args.status) {
-      return await ctx.db
+async function readAgents(
+  ctx: QueryCtx,
+  args: { status?: AgentStatus; limit?: number },
+  demoOnly: boolean,
+) {
+  const limit = args.limit ?? 50;
+  const rows = args.status
+    ? await ctx.db
         .query("executionAgents")
         .withIndex("by_status", (q) => q.eq("status", args.status!))
         .order("desc")
-        .take(limit);
-    }
-    return await ctx.db.query("executionAgents").order("desc").take(limit);
+        .take(DEMO_SCAN_LIMIT)
+    : await ctx.db.query("executionAgents").order("desc").take(DEMO_SCAN_LIMIT);
+  return rows.filter((agent) => isDemoId(agent.agentId) === demoOnly).slice(0, limit);
+}
+
+export const list = query({
+  args: {
+    status: v.optional(statusV),
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => readAgents(ctx, args, false),
+});
+
+export const listForDashboard = query({
+  args: {
+    status: v.optional(statusV),
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    return readAgents(ctx, args, await isDemoModeEnabled(ctx));
   },
 });
 
 export const get = query({
   args: { agentId: v.string() },
   handler: async (ctx, args) => {
+    if (isDemoId(args.agentId)) return null;
     return await ctx.db
       .query("executionAgents")
       .withIndex("by_agent_id", (q) => q.eq("agentId", args.agentId))
@@ -105,6 +128,30 @@ export const get = query({
 export const getLogs = query({
   args: { agentId: v.string(), limit: v.optional(v.number()) },
   handler: async (ctx, args) => {
+    if (isDemoId(args.agentId)) return [];
+    return await ctx.db
+      .query("agentLogs")
+      .withIndex("by_agent", (q) => q.eq("agentId", args.agentId))
+      .order("asc")
+      .take(args.limit ?? 500);
+  },
+});
+
+export const getForDashboard = query({
+  args: { agentId: v.string() },
+  handler: async (ctx, args) => {
+    if (isDemoId(args.agentId) !== (await isDemoModeEnabled(ctx))) return null;
+    return await ctx.db
+      .query("executionAgents")
+      .withIndex("by_agent_id", (q) => q.eq("agentId", args.agentId))
+      .unique();
+  },
+});
+
+export const getLogsForDashboard = query({
+  args: { agentId: v.string(), limit: v.optional(v.number()) },
+  handler: async (ctx, args) => {
+    if (isDemoId(args.agentId) !== (await isDemoModeEnabled(ctx))) return [];
     return await ctx.db
       .query("agentLogs")
       .withIndex("by_agent", (q) => q.eq("agentId", args.agentId))

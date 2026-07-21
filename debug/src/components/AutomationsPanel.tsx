@@ -34,7 +34,7 @@ const STATUS_COLOR: Record<string, { dot: string; text: string }> = {
 };
 
 export function AutomationsPanel({ isDark }: { isDark: boolean }) {
-  const automations = useQuery(api.automations.list, {});
+  const automations = useQuery(api.automations.listForDashboard, {});
   const setEnabled = useMutation(api.automations.setEnabled);
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
@@ -170,8 +170,8 @@ function AutomationDetail({
   onBack: () => void;
   isDark: boolean;
 }) {
-  const auto = useQuery(api.automations.get, { automationId });
-  const runs = useQuery(api.automations.recentRuns, { automationId, limit: 30 });
+  const auto = useQuery(api.automations.getForDashboard, { automationId });
+  const runs = useQuery(api.automations.recentRunsForDashboard, { automationId, limit: 30 });
   const setEnabled = useMutation(api.automations.setEnabled);
   const remove = useMutation(api.automations.remove);
 

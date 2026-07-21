@@ -13,12 +13,15 @@ import {
 } from "@hugeicons/core-free-icons";
 
 // Integration brands map tool/server names to logo + display name.
-// Uses Google's favicon service so we don't ship logo assets.
+// Most web tools use Google's favicon service; local app integrations can
+// provide their own public asset path for exact app icons.
 type ToolBrand = {
   key: string;
   displayName: string;
   domain: string;
   aliases: string[];
+  logoUrl?: string;
+  fullBleedLogo?: boolean;
 };
 
 const TOOL_BRANDS: ToolBrand[] = [
@@ -72,7 +75,30 @@ const TOOL_BRANDS: ToolBrand[] = [
   { key: "stripe", displayName: "Stripe", domain: "stripe.com", aliases: ["stripe"] },
   { key: "supabase", displayName: "Supabase", domain: "supabase.com", aliases: ["supabase"] },
   { key: "granola", displayName: "Granola", domain: "granola.ai", aliases: ["granola", "granola_mcp"] },
-  { key: "imessage", displayName: "iMessage", domain: "apple.com", aliases: ["imessage", "messages"] },
+  {
+    key: "imessage",
+    displayName: "iMessage",
+    domain: "apple.com",
+    aliases: ["imessage", "messages", "message", "chats", "chat", "sms"],
+    logoUrl: "/integration-icons/imessage.png",
+    fullBleedLogo: true,
+  },
+  {
+    key: "apple-notes",
+    displayName: "Apple Notes",
+    domain: "apple.com",
+    aliases: ["apple-notes", "notes", "note"],
+    logoUrl: "/integration-icons/apple-notes.png",
+    fullBleedLogo: true,
+  },
+  {
+    key: "apple-reminders",
+    displayName: "Apple Reminders",
+    domain: "apple.com",
+    aliases: ["apple-reminders", "reminders", "reminder"],
+    logoUrl: "/integration-icons/apple-reminders.png",
+    fullBleedLogo: true,
+  },
 ];
 
 function normalize(value: string): string {
@@ -173,20 +199,33 @@ export function IntegrationLogo({
   const radius = Math.max(8, Math.round(size * 0.4));
   const iconSize = Math.max(12, Math.round(size * 0.72));
 
-  // Prefer an explicit URL (e.g. Composio's branded toolkit logo) over favicon-by-domain.
-  const imgSrc = !failed && logoUrl ? logoUrl : !failed && brand ? faviconUrl(brand.domain) : null;
+  // Prefer an explicit URL (e.g. Composio's branded toolkit logo), then local
+  // brand assets, then favicon-by-domain for ordinary web integrations.
+  const imgSrc =
+    !failed && logoUrl
+      ? logoUrl
+      : !failed && brand?.logoUrl
+        ? brand.logoUrl
+        : !failed && brand
+          ? faviconUrl(brand.domain)
+          : null;
+  const fullBleedLogo = !logoUrl && Boolean(brand?.fullBleedLogo);
 
   if (imgSrc) {
     return (
       <span
-        className={`inline-flex shrink-0 items-center justify-center overflow-hidden bg-white/95 ${className}`}
-        style={{ ...style, borderRadius: radius, border: "0.5px solid rgba(148,163,184,0.2)" }}
+        className={`inline-flex shrink-0 items-center justify-center overflow-hidden ${fullBleedLogo ? "bg-transparent" : "bg-white/95"} ${className}`}
+        style={{
+          ...style,
+          borderRadius: radius,
+          border: fullBleedLogo ? "0" : "0.5px solid rgba(148,163,184,0.2)",
+        }}
       >
         <img
           src={imgSrc}
           alt={brand?.displayName ?? raw ?? "integration"}
-          width={iconSize}
-          height={iconSize}
+          width={fullBleedLogo ? size : iconSize}
+          height={fullBleedLogo ? size : iconSize}
           className="block object-contain"
           loading="lazy"
           decoding="async"

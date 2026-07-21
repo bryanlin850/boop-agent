@@ -1,5 +1,6 @@
-import { mutation, query } from "./_generated/server";
+import { mutation, query, type QueryCtx } from "./_generated/server";
 import { v } from "convex/values";
+import { DEMO_SCAN_LIMIT, isDemoId, isDemoModeEnabled } from "./demoMode";
 
 const statusV = v.union(
   v.literal("running"),
@@ -44,9 +45,23 @@ export const updateRun = mutation({
   },
 });
 
+async function readRuns(ctx: QueryCtx, limit: number, demoOnly: boolean) {
+  const rows = await ctx.db
+    .query("consolidationRuns")
+    .order("desc")
+    .take(DEMO_SCAN_LIMIT);
+  return rows.filter((run) => isDemoId(run.runId) === demoOnly).slice(0, limit);
+}
+
 export const listRuns = query({
   args: { limit: v.optional(v.number()) },
+  handler: async (ctx, args) => readRuns(ctx, args.limit ?? 25, false),
+});
+
+export const listRunsForDashboard = query({
+  args: { limit: v.optional(v.number()) },
   handler: async (ctx, args) => {
-    return await ctx.db.query("consolidationRuns").order("desc").take(args.limit ?? 25);
+    const limit = args.limit ?? 25;
+    return readRuns(ctx, limit, await isDemoModeEnabled(ctx));
   },
 });

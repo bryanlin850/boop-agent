@@ -4,9 +4,26 @@ import { convex } from "./convex-client.js";
 import { handleUserMessage } from "./interaction-agent.js";
 import { broadcast } from "./broadcast.js";
 import { validateImageHeader, MAX_IMAGE_BYTES, type ImageMediaType } from "./images/mime.js";
+import { redactContactHandle, redactPhoneNumbers } from "./privacy.js";
+import { maybeHandleScriptedDemoReply } from "./scripted-demo-replies.js";
+import { verifySendblueWebhookSecret } from "./sendblue-webhook-auth.js";
 
 const API_BASE = "https://api.sendblue.com/api";
 const MAX_CHUNK = 2900;
+
+export function extractSendblueMediaUrls(
+  mediaUrl: unknown,
+  mediaUrls: unknown,
+): string[] {
+  const urls = new Set<string>();
+  if (Array.isArray(mediaUrls)) {
+    for (const value of mediaUrls) {
+      if (typeof value === "string" && value.trim()) urls.add(value.trim());
+    }
+  }
+  if (typeof mediaUrl === "string" && mediaUrl.trim()) urls.add(mediaUrl.trim());
+  return [...urls];
+}
 
 function stripMarkdown(text: string): string {
   return text
@@ -74,7 +91,9 @@ export async function sendImessage(
     );
     return;
   }
-  const plain = stripMarkdown(text);
+  // Intentional privacy guard: Boop should not deliver phone numbers back over
+  // iMessage, even if an agent includes one in its final reply.
+  const plain = redactPhoneNumbers(stripMarkdown(text));
   // SendBlue requires a non-empty content. If we only have media to send,
   // give it a single space so the API accepts the request — iMessage just
   // shows the attachment with no caption.
@@ -99,7 +118,9 @@ export async function sendImessage(
     });
     if (!res.ok) {
       const body = await res.text().catch(() => "");
-      console.error(`[sendblue] send failed ${res.status}: ${body}`);
+      console.error(
+        `[sendblue] send failed ${res.status}: ${redactPhoneNumbers(body).slice(0, 500)}`,
+      );
       if (body.includes("missing required parameter") && body.includes("from_number")) {
         console.error(
           `[sendblue] → Set SENDBLUE_FROM_NUMBER in .env.local to your Sendblue-provisioned number and restart the server.`,
@@ -110,11 +131,11 @@ export async function sendImessage(
         );
       } else if (body.includes("This phone number is not defined")) {
         console.error(
-          `[sendblue] → Sendblue doesn't recognize from_number=${from}. Run \`npm run sendblue:sync\` to pull the correct one from \`sendblue lines\`, then restart the server.`,
+          `[sendblue] → Sendblue doesn't recognize from_number=${redactContactHandle(from)}. Run \`npm run sendblue:sync\` to pull the correct one from \`sendblue lines\`, then restart the server.`,
         );
       }
     } else {
-      console.log(`[sendblue] → sent ${part.length} chars to ${toNumber}`);
+      console.log(`[sendblue] → sent ${part.length} chars to ${redactContactHandle(toNumber)}`);
     }
   }
 }
@@ -223,22 +244,21 @@ export function createSendblueRouter(): express.Router {
   const router = express.Router();
 
   router.post("/webhook", async (req, res) => {
+    if (!verifySendblueWebhookSecret(req.get("sb-signing-secret"))) {
+      res.status(401).json({ error: "invalid webhook signature" });
+      return;
+    }
+
     const { content, from_number, is_outbound, message_handle, media_url, media_urls } =
       req.body ?? {};
-    const rawUrls: string[] = [];
-    if (Array.isArray(media_urls)) {
-      for (const u of media_urls) {
-        if (typeof u === "string" && u.length > 0) rawUrls.push(u);
-      }
-    } else if (typeof media_url === "string" && media_url.length > 0) {
-      rawUrls.push(media_url);
-    }
+    const rawUrls = extractSendblueMediaUrls(media_url, media_urls);
     const hasAttachments = rawUrls.length > 0;
+    const textForLog = typeof content === "string" ? content : "";
     // Allow attachment-only messages (image with no caption). SendBlue still
     // sends `content` as an empty string in that case; treat empty-content
     // with attachments as valid input by giving it a placeholder body.
     const effectiveContent =
-      content && content.length > 0 ? content : hasAttachments ? "(attachment)" : "";
+      textForLog.length > 0 ? textForLog : hasAttachments ? "(attachment)" : "";
     if (is_outbound || !from_number || !effectiveContent) {
       res.json({ ok: true, skipped: true });
       return;
@@ -264,11 +284,13 @@ export function createSendblueRouter(): express.Router {
 
     const conversationId = `sms:${from_number}`;
     const turnTag = Math.random().toString(36).slice(2, 8);
-    const preview =
-      effectiveContent.length > 100 ? effectiveContent.slice(0, 100) + "…" : effectiveContent;
+    const safeTextForLog = redactPhoneNumbers(effectiveContent);
+    const preview = safeTextForLog.length > 100
+      ? safeTextForLog.slice(0, 100) + "…"
+      : safeTextForLog;
     const attachmentTag = hasAttachments ? ` [+${rawUrls.length} attachment]` : "";
     console.log(
-      `[turn ${turnTag}] ← ${from_number}: ${JSON.stringify(preview)}${attachmentTag}`,
+      `[turn ${turnTag}] ← ${redactContactHandle(from_number)}: ${JSON.stringify(preview)}${attachmentTag}`,
     );
     const start = Date.now();
 
@@ -280,6 +302,20 @@ export function createSendblueRouter(): express.Router {
       attachments: hasAttachments ? rawUrls : undefined,
     });
     res.json({ ok: true });
+
+    if (
+      await maybeHandleScriptedDemoReply(
+        {
+          conversationId,
+          content: textForLog,
+          fromNumber: from_number,
+          turnTag,
+        },
+        { sendImessage, sendTypingIndicator },
+      )
+    ) {
+      return;
+    }
 
     const stopTyping = startTypingLoop(from_number);
     try {
@@ -294,8 +330,10 @@ export function createSendblueRouter(): express.Router {
       const replyText = result.text;
       if (replyText || result.mediaUrl) {
         const elapsed = ((Date.now() - start) / 1000).toFixed(1);
-        const replyPreview =
-          replyText.length > 100 ? replyText.slice(0, 100) + "…" : replyText;
+        const safeReplyPreview = redactPhoneNumbers(replyText);
+        const replyPreview = safeReplyPreview.length > 100
+          ? safeReplyPreview.slice(0, 100) + "…"
+          : safeReplyPreview;
         const mediaTag = result.mediaUrl ? " [+media]" : "";
         console.log(
           `[turn ${turnTag}] → reply (${elapsed}s, ${replyText.length} chars)${mediaTag}: ${JSON.stringify(replyPreview)}`,

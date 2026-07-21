@@ -1,4 +1,12 @@
 import { query } from "./_generated/server";
+import {
+  DEMO_SCAN_LIMIT,
+  isDemoAutomationRun,
+  isDemoId,
+  isDemoMessage,
+  isDemoModeEnabled,
+  isDemoUsageRecord,
+} from "./demoMode";
 
 // Cap per-table scans so a long-lived install doesn't hit Convex's 16,384
 // .collect() ceiling and break the dashboard. Metrics reflect the most
@@ -8,19 +16,32 @@ const METRICS_SCAN_LIMIT = 5000;
 export const metrics = query({
   args: {},
   handler: async (ctx) => {
-    const [messages, memories, agents, usageRecords, automationRuns] = await Promise.all([
+    const demoMode = await isDemoModeEnabled(ctx);
+    let [messages, memories, agents, usageRecords, automationRuns] = await Promise.all([
       ctx.db.query("messages").order("desc").take(METRICS_SCAN_LIMIT),
       ctx.db.query("memoryRecords").order("desc").take(METRICS_SCAN_LIMIT),
       ctx.db.query("executionAgents").order("desc").take(METRICS_SCAN_LIMIT),
       ctx.db.query("usageRecords").order("desc").take(METRICS_SCAN_LIMIT),
       ctx.db.query("automationRuns").order("desc").take(METRICS_SCAN_LIMIT),
     ]);
+    const scanned = {
+      messages: messages.length,
+      memories: memories.length,
+      agents: agents.length,
+      automationRuns: automationRuns.length,
+      usageRecords: usageRecords.length,
+    };
+    messages = messages.filter((message) => isDemoMessage(message) === demoMode);
+    memories = memories.filter((memory) => isDemoId(memory.memoryId) === demoMode);
+    agents = agents.filter((agent) => isDemoId(agent.agentId) === demoMode);
+    automationRuns = automationRuns.filter((run) => isDemoAutomationRun(run) === demoMode);
+    usageRecords = usageRecords.filter((record) => isDemoUsageRecord(record) === demoMode);
     const truncated =
-      messages.length === METRICS_SCAN_LIMIT ||
-      memories.length === METRICS_SCAN_LIMIT ||
-      agents.length === METRICS_SCAN_LIMIT ||
-      usageRecords.length === METRICS_SCAN_LIMIT ||
-      automationRuns.length === METRICS_SCAN_LIMIT;
+      scanned.messages === METRICS_SCAN_LIMIT ||
+      scanned.memories === METRICS_SCAN_LIMIT ||
+      scanned.agents === METRICS_SCAN_LIMIT ||
+      scanned.automationRuns === METRICS_SCAN_LIMIT ||
+      scanned.usageRecords === METRICS_SCAN_LIMIT;
 
     const activeMem = memories.filter((m) => m.lifecycle === "active");
 
@@ -116,15 +137,16 @@ export const metrics = query({
 export const imageStorageStats = query({
   args: {},
   handler: async (ctx) => {
+    const demoMode = await isDemoModeEnabled(ctx);
     // Capped scan like the other dashboard queries — unbounded .collect()
     // throws TransactionTooLargeError when the bandwidth limit is exceeded.
     const msgs = await ctx.db
       .query("messages")
       .order("desc")
-      .take(METRICS_SCAN_LIMIT);
+      .take(demoMode ? DEMO_SCAN_LIMIT : METRICS_SCAN_LIMIT);
     const seen = new Set<string>();
     let count = 0;
-    for (const m of msgs) {
+    for (const m of msgs.filter((message) => isDemoMessage(message) === demoMode)) {
       for (const id of m.imageStorageIds ?? []) {
         if (seen.has(id as unknown as string)) continue;
         seen.add(id as unknown as string);

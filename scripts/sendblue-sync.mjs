@@ -61,7 +61,7 @@ function parsePhones(output) {
     /* not JSON */
   }
 
-  // The sendblue CLI formats like "+1 (305) 336-9541".
+  // The Sendblue CLI formats numbers like "+1 (555) 010-1234".
   // Process line-by-line so we don't greedily span into e.g. "1 line total".
   for (const rawLine of clean.split(/\r?\n/)) {
     const line = rawLine.trim();

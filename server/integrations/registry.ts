@@ -12,6 +12,7 @@ export interface IntegrationModule {
 
 export interface IntegrationContext {
   conversationId?: string;
+  onAttachment?: (url: string) => void;
 }
 
 const registry = new Map<string, IntegrationModule>();
@@ -59,8 +60,11 @@ export async function refreshIntegrations(): Promise<void> {
   await loadIntegrations();
 }
 
-export function makeContext(conversationId?: string): IntegrationContext {
-  return { conversationId };
+export function makeContext(
+  conversationId?: string,
+  onAttachment?: (url: string) => void,
+): IntegrationContext {
+  return { conversationId, onAttachment };
 }
 
 export async function buildMcpServersForIntegrations(
@@ -91,8 +95,9 @@ export async function buildMcpServersForIntegrations(
 export async function buildRuntimeToolsForIntegrations(
   names: string[],
   conversationId?: string,
+  onAttachment?: (url: string) => void,
 ): Promise<RuntimeTool[]> {
-  const ctx = makeContext(conversationId);
+  const ctx = makeContext(conversationId, onAttachment);
   const out: RuntimeTool[] = [];
   for (const name of names) {
     const mod = registry.get(name);

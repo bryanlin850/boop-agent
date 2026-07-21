@@ -187,6 +187,8 @@ export interface SpawnResult {
   agentId: string;
   result: string;
   status: "completed" | "failed" | "cancelled";
+  /** Signed storage URL for a binary attachment produced during this run. */
+  mediaUrl?: string;
   /**
    * Concatenated messages the agent passed to the `notify` tool, joined with
    * blank lines. Undefined when `automationNotify` was off or the agent never
@@ -253,9 +255,16 @@ export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promis
   const integrationServers = isClaudeRuntime
     ? await buildMcpServersForIntegrations(opts.integrations, opts.conversationId)
     : {};
+  let pendingMediaUrl: string | undefined;
   const integrationTools =
     runtimeConfig.runtime === "codex"
-      ? await buildRuntimeToolsForIntegrations(opts.integrations, opts.conversationId)
+      ? await buildRuntimeToolsForIntegrations(
+          opts.integrations,
+          opts.conversationId,
+          (url) => {
+            pendingMediaUrl = url;
+          },
+        )
       : [];
 
   // Claude-only MCP servers: reddit search, patchright browser, files cache.
@@ -391,7 +400,13 @@ export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promis
   broadcast("agent_done", { agentId, status, result: buffer.slice(0, 200) });
 
   const notification = notifications.length ? notifications.join("\n\n") : undefined;
-  return { agentId, result: buffer || errorMsg || "(no output)", status, notification };
+  return {
+    agentId,
+    result: buffer || errorMsg || "(no output)",
+    status,
+    notification,
+    mediaUrl: pendingMediaUrl,
+  };
 }
 
 export function cancelAgent(agentId: string): boolean {

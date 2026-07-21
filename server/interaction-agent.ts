@@ -687,6 +687,7 @@ export async function handleUserMessage(opts: HandleOpts): Promise<HandleResult>
           runtimeConfig,
           imageStorageIds,
         });
+        if (res.mediaUrl) pendingMediaUrl = res.mediaUrl;
         return runtimeText(`[agent ${res.agentId} ${res.status}]\n\n${redactPhoneNumbers(res.result)}`);
       },
     ),

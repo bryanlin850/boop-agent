@@ -1,4 +1,8 @@
 import { z } from "zod";
+import { readFile } from "node:fs/promises";
+import { basename } from "node:path";
+import { api } from "../../convex/_generated/api.js";
+import { convex } from "../convex-client.js";
 import { createClaudeMcpServer } from "../runtimes/claude.js";
 import { defineRuntimeTool } from "../runtimes/tool.js";
 import { runtimeText, type RuntimeTool } from "../runtimes/types.js";
@@ -21,6 +25,39 @@ const RUNTIME_NAMESPACE = "local_browser";
 const FALLBACK_NOTE =
   "Use this local browser only when a native integration does not cover the task, or when the site needs a real logged-in browser, visual interaction, or a bot-wall-resistant flow.";
 
+export interface BrowserToolOptions {
+  conversationId?: string;
+  onAttachment?: (url: string) => void;
+}
+
+function randomId(prefix: string): string {
+  return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+export async function saveBrowserScreenshotAttachment(
+  path: string,
+  options: BrowserToolOptions = {},
+): Promise<{ fileId: string; name: string; url: string }> {
+  const bytes = await readFile(path);
+  const fileId = randomId("file");
+  const name = basename(path);
+  await convex.action(api.files.saveBlob, {
+    fileId,
+    name,
+    kind: "image",
+    base64: bytes.toString("base64"),
+    contentType: "image/png",
+    description: "Screenshot captured with Boop's local browser",
+    tags: ["browser", "screenshot"],
+    source: "browser",
+    conversationId: options.conversationId,
+  });
+  const url = await convex.query(api.files.getStorageUrl, { fileId });
+  if (!url) throw new Error("Screenshot was saved, but no attachment URL was generated.");
+  options.onAttachment?.(url);
+  return { fileId, name, url };
+}
+
 function ok(text: string) {
   return runtimeText(text);
 }
@@ -38,7 +75,10 @@ async function wrap(fn: () => Promise<string>) {
   }
 }
 
-export function createBrowserTools(namespace = RUNTIME_NAMESPACE): RuntimeTool[] {
+export function createBrowserTools(
+  options: BrowserToolOptions = {},
+  namespace = RUNTIME_NAMESPACE,
+): RuntimeTool[] {
   return [
     defineRuntimeTool(
       namespace,
@@ -103,9 +143,16 @@ export function createBrowserTools(namespace = RUNTIME_NAMESPACE): RuntimeTool[]
     defineRuntimeTool(
       namespace,
       "browser_screenshot",
-      "Capture a screenshot of the current browser page and return the local PNG path. Use only when the accessibility snapshot is insufficient.",
+      "Capture the current browser page, save the PNG to the user's files store, and queue it as a real image attachment when the request came from iMessage. Do not expose a local file path in the final answer.",
       {},
-      async () => wrap(async () => `Screenshot saved: ${await browserScreenshot()}`),
+      async () =>
+        wrap(async () => {
+          const path = await browserScreenshot();
+          const saved = await saveBrowserScreenshotAttachment(path, options);
+          return options.onAttachment
+            ? `Screenshot captured and queued as an image attachment (${saved.fileId}). Tell the user it is attached; do not include a path or URL.`
+            : JSON.stringify(saved);
+        }),
     ),
     defineRuntimeTool(
       namespace,
@@ -142,6 +189,6 @@ export function createBrowserTools(namespace = RUNTIME_NAMESPACE): RuntimeTool[]
   ];
 }
 
-export function createBrowserMcp() {
-  return createClaudeMcpServer(MCP_NAMESPACE, createBrowserTools(MCP_NAMESPACE));
+export function createBrowserMcp(options: BrowserToolOptions = {}) {
+  return createClaudeMcpServer(MCP_NAMESPACE, createBrowserTools(options, MCP_NAMESPACE));
 }

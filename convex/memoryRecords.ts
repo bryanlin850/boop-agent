@@ -153,24 +153,32 @@ type MemoryListArgs = {
 };
 
 async function readMemories(ctx: QueryCtx, args: MemoryListArgs, demoOnly: boolean) {
-  const limit = args.limit ?? 100;
-  const results = args.tier
-    ? await ctx.db
+  const limit = Math.max(0, Math.min(args.limit ?? 100, DEMO_SCAN_LIMIT));
+  if (limit === 0) return [];
+
+  const source = args.tier
+    ? ctx.db
         .query("memoryRecords")
         .withIndex("by_tier", (q) => q.eq("tier", args.tier!))
         .order("desc")
-        .take(DEMO_SCAN_LIMIT)
     : args.segment
-      ? await ctx.db
+      ? ctx.db
           .query("memoryRecords")
           .withIndex("by_segment", (q) => q.eq("segment", args.segment!))
           .order("desc")
-          .take(DEMO_SCAN_LIMIT)
-      : await ctx.db.query("memoryRecords").order("desc").take(DEMO_SCAN_LIMIT);
+      : ctx.db.query("memoryRecords").order("desc");
   const lifecycle = args.lifecycle ?? "active";
-  return results
-    .filter((record) => isDemoId(record.memoryId) === demoOnly && record.lifecycle === lifecycle)
-    .slice(0, limit);
+  const results: Doc<"memoryRecords">[] = [];
+  let scanned = 0;
+  for await (const record of source) {
+    scanned += 1;
+    if (isDemoId(record.memoryId) === demoOnly && record.lifecycle === lifecycle) {
+      results.push(record);
+      if (results.length === limit) break;
+    }
+    if (scanned === DEMO_SCAN_LIMIT) break;
+  }
+  return results;
 }
 
 const listArgs = {

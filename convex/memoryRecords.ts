@@ -3,6 +3,7 @@ import { v } from "convex/values";
 import { api } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { DEMO_SCAN_LIMIT, isDemoId, isDemoModeEnabled } from "./demoMode";
+import { normalizeMemoryListLimit } from "./memoryRecordLimits";
 
 const tierV = v.union(v.literal("short"), v.literal("long"), v.literal("permanent"));
 const segmentV = v.union(
@@ -153,7 +154,7 @@ type MemoryListArgs = {
 };
 
 async function readMemories(ctx: QueryCtx, args: MemoryListArgs, demoOnly: boolean) {
-  const limit = Math.max(0, Math.min(args.limit ?? 100, DEMO_SCAN_LIMIT));
+  const limit = normalizeMemoryListLimit(args.limit, DEMO_SCAN_LIMIT);
   if (limit === 0) return [];
 
   const source = args.tier

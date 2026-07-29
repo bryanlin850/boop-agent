@@ -25,6 +25,7 @@ interface AppleStatus {
   enabled: boolean;
   messagesEnabled: boolean;
   notesEnabled: boolean;
+  notesWriteEnabled: boolean;
   remindersEnabled: boolean;
   bridge: AppleBridgeStatus;
 }
@@ -104,6 +105,40 @@ export function AppleSection({ isDark }: { isDark: boolean }) {
         text: notes === "granted"
           ? "Apple Notes access is live."
           : "Apple Notes access still needs macOS Automation permission.",
+      });
+    } catch (err) {
+      setMessage({ tone: "err", text: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function setNotesWriteEnabled(nextEnabled: boolean) {
+    if (
+      nextEnabled &&
+      !window.confirm(
+        "Allow Boop to create Apple Notes and, after your explicit approval, append to or update existing notes?",
+      )
+    ) {
+      return;
+    }
+    setBusy("NotesWrite");
+    setMessage(null);
+    try {
+      const res = await fetch(
+        `/api/apple/notes/write/${nextEnabled ? "enable" : "disable"}`,
+        { method: "POST" },
+      );
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error ?? `status ${res.status}`);
+      }
+      setStatus((await res.json()) as AppleStatus);
+      setMessage({
+        tone: "ok",
+        text: nextEnabled
+          ? "Apple Notes writing is enabled. Existing-note changes still require confirmation."
+          : "Apple Notes writing is disabled.",
       });
     } catch (err) {
       setMessage({ tone: "err", text: err instanceof Error ? err.message : String(err) });
@@ -242,12 +277,39 @@ export function AppleSection({ isDark }: { isDark: boolean }) {
           </div>
         ) : (
           <div className={subtlePanelClass(isDark, "px-3 py-3 text-xs leading-relaxed text-zinc-500")}>
-            Apple data reads only work on macOS. Calendar requires the optional Apple bridge.
+            Local Apple data only works on macOS. Calendar requires the optional Apple bridge.
             {bridge?.error && (
               <span className={`block mt-1.5 mono text-[11px] ${isDark ? "text-rose-300" : "text-rose-600"}`}>
                 {bridge.error}
               </span>
             )}
+          </div>
+        )}
+        {enabled && (
+          <div
+            className={`mt-3 flex flex-col gap-3 rounded-2xl border px-3 py-3 sm:flex-row sm:items-center sm:justify-between ${
+              status?.notesWriteEnabled
+                ? isDark
+                  ? "border-amber-400/25 bg-amber-400/10"
+                  : "border-amber-200 bg-amber-50"
+                : isDark
+                  ? "border-white/10 bg-white/[0.03]"
+                  : "border-zinc-200 bg-zinc-50"
+            }`}
+          >
+            <div>
+              <div className={`text-xs font-medium ${label}`}>Apple Notes writing</div>
+              <div className={`mt-1 text-xs leading-relaxed ${muted}`}>
+                Separate opt-in. New notes can be created directly; existing notes require draft approval.
+              </div>
+            </div>
+            <SwitchButton
+              checked={status?.notesWriteEnabled ?? false}
+              disabled={!loaded || busy !== null}
+              label="Toggle Apple Notes writing"
+              isDark={isDark}
+              onClick={() => setNotesWriteEnabled(!(status?.notesWriteEnabled ?? false))}
+            />
           </div>
         )}
         {enabled && running && bridge?.source === "local-server" && notesPermission !== "granted" && (
@@ -264,7 +326,7 @@ export function AppleSection({ isDark }: { isDark: boolean }) {
           >
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <span>
-                Enable read-only Apple Notes by allowing macOS Automation access to Notes.
+                Enable Apple Notes by allowing macOS Automation access to Notes. Writing remains a separate opt-in.
               </span>
               <div className="flex shrink-0 flex-wrap gap-2">
                 <button

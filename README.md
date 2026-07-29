@@ -54,7 +54,7 @@ Built on:
 - **Heartbeat + retry** — stuck agents auto-fail, debug dashboard can retry.
 - **Composio-powered integrations** — one API key unlocks 1000+ toolkits. Connect Gmail, Slack, GitHub, Linear, Notion, Drive, HubSpot, etc. with a click from the debug dashboard. Composio handles OAuth + token refresh.
 - **Optional local browser use** — when enabled in Settings, spawned agents can use a Patchright-backed Chrome profile for login-required services, visual workflows, or pages that reject ordinary automation.
-- **Optional local Apple data** — Mac-only, read-only iMessage, Apple Notes, and Apple Reminders connectors that stay off until you enable Apple data and connect each source in the debug dashboard.
+- **Optional local Apple data** — Mac-only connectors for read-only iMessage and Reminders plus Apple Notes with separately enabled, approval-guarded writes.
 - **Debug dashboard** (React + Vite) with a Boop mascot — Dashboard (usage, known cost, tokens, agent status), Agents (timeline + integration logos), Automations, Memory (table + force-directed graph), Events, Connections.
 - **Convex** for persistence — real-time, typed, free tier.
 - **Uses your Claude Code or Codex/ChatGPT subscription** — choose during setup, with no separate provider API key required.
@@ -433,6 +433,7 @@ Everything lives in `.env.local` (auto-created by `npm run setup`). See `.env.ex
 | `BOOP_BROWSER_EXTRA_ARGS` | no | Optional newline-separated Chrome flags. Only `--flag` lines are used. |
 | `BOOP_APPLE_ENABLED` | no | Fallback master switch for optional local Apple data. Default `false`. Once changed in the dashboard, the Convex `settings` row takes precedence over this env var. |
 | `BOOP_APPLE_MESSAGES_ENABLED` / `BOOP_APPLE_NOTES_ENABLED` / `BOOP_APPLE_REMINDERS_ENABLED` | no | Per-source fallbacks for local iMessage, Apple Notes, and Apple Reminders. Each defaults to `false`, so enabling one source does not implicitly enable the others. |
+| `BOOP_APPLE_NOTES_WRITE_ENABLED` | no | Separate fallback for Apple Notes writing. Defaults to `false` and is effective only when the master Apple and Apple Notes switches are also enabled. |
 | `BOOP_UPSTREAM_CHECK` | no | Set to `false` to disable the new-version banner on `npm run dev`. Default: on. |
 | `PORT` | no | Default `3456`. |
 | `PUBLIC_URL` | no | Base URL used in the Sendblue webhook. Composio handles its own OAuth callbacks on `platform.composio.dev`, so this is just for inbound iMessage. |
@@ -465,7 +466,7 @@ For Codex runtime, local browser tools are exposed internally under the `local_b
 
 ## Local Apple data
 
-Local Apple data is optional, Mac-only, and read-only. It is designed for private single-user local runs where you want Boop to answer questions about data already on the Mac running the server.
+Local Apple data is optional and Mac-only. iMessage and Reminders are read-only. Apple Notes is read-only by default and has a separate, default-off write switch for private single-user local runs.
 
 It is off by default in two layers:
 
@@ -479,13 +480,16 @@ Turn it on from the debug dashboard, either in the browser during local developm
 3. Go to **Connections → Local Mac**.
 4. Click **Connect** only for the sources you want Boop to read.
 5. Use **Disconnect** to turn any source off again.
+6. To allow Apple Notes writes, open the Apple Notes connection card and enable **Allow writes**. Disabling or disconnecting Apple Notes turns writes off.
+
+With writes enabled, Boop exposes `apple_create_note`, `apple_append_note`, and `apple_update_note`. Creating a new note can run from an explicit request. Appending to or updating an existing note is staged as a draft and runs only after the user approves it. Approved changes carry an ASCII-only SHA-256 version token derived from the note's modification time, title, and HTML body, so Boop refuses to overwrite a note whose content changed while approval was pending, including another edit within the same second. During approved execution, only the exact authorized Notes write tool is exposed. There is no delete-note tool.
 
 You can also view the overall Apple status from **Settings → Apple data**. Dashboard changes are stored in Convex's `settings` table and override `.env.local` fallbacks. The env vars in `.env.example` are useful for first-run defaults, but they are not required.
 
 | Source | Permission | Notes |
 |---|---|---|
 | iMessage / SMS history | Full Disk Access for the app or process running Boop, such as Boop.app for desktop runs | Reads `~/Library/Messages/chat.db` locally through `/usr/bin/sqlite3`. |
-| Apple Notes | macOS Automation permission for Notes | Uses `/usr/bin/osascript` and exposes search/read tools only. |
+| Apple Notes | macOS Automation permission for Notes | Uses `/usr/bin/osascript`. Reads are independently enabled; create/append/update require the additional write opt-in, and existing-note changes require draft approval. |
 | Apple Reminders | macOS Automation permission for Reminders | Uses `/usr/bin/osascript` and exposes list tools only. |
 | Apple Calendar | Optional Apple bridge | Calendar events are not read by the local server path in this repo. |
 
@@ -601,9 +605,9 @@ boop-agent/
 │   ├── broadcast.ts               # WS fanout
 │   ├── convex-client.ts           # Convex HTTP client
 │   ├── apple/
-│   │   ├── tools.ts               # Read-only Apple runtime/MCP tools
+│   │   ├── tools.ts               # Apple runtime/MCP tools and guarded Notes writes
 │   │   ├── messages-local.ts      # Local iMessage SQLite reader
-│   │   ├── notes-local.ts         # Local Apple Notes osascript reader
+│   │   ├── notes-local.ts         # Local Apple Notes osascript reader/writer
 │   │   └── reminders-local.ts     # Local Apple Reminders osascript reader
 │   ├── browser/
 │   │   ├── launcher.ts            # Patchright Chrome launch/status/actions

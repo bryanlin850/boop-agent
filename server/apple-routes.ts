@@ -9,6 +9,7 @@ import {
   APPLE_ENABLED_KEY,
   APPLE_MESSAGES_ENABLED_KEY,
   APPLE_NOTES_ENABLED_KEY,
+  APPLE_NOTES_WRITE_ENABLED_KEY,
   APPLE_REMINDERS_ENABLED_KEY,
   clearAppleSettingsCache,
   getAppleSettings,
@@ -21,6 +22,7 @@ interface AppleStatusResponse {
   enabled: boolean;
   messagesEnabled: boolean;
   notesEnabled: boolean;
+  notesWriteEnabled: boolean;
   remindersEnabled: boolean;
   bridge: AppleBridgeStatus;
 }
@@ -54,6 +56,7 @@ async function appleStatus(): Promise<AppleStatusResponse> {
     enabled: settings.enabled,
     messagesEnabled: settings.messagesEnabled,
     notesEnabled: settings.notesEnabled,
+    notesWriteEnabled: settings.notesWriteEnabled,
     remindersEnabled: settings.remindersEnabled,
     bridge,
   };
@@ -87,6 +90,37 @@ async function setAppleSourceEnabled(
       : Promise.resolve(),
     convex.mutation(api.settings.set, {
       key,
+      value: enabled ? "true" : "false",
+    }),
+    source === "notes" && !enabled
+      ? convex.mutation(api.settings.set, {
+          key: APPLE_NOTES_WRITE_ENABLED_KEY,
+          value: "false",
+        })
+      : Promise.resolve(),
+  ]);
+  clearAppleSettingsCache();
+  return appleStatus();
+}
+
+async function setAppleNotesWriteEnabled(
+  enabled: boolean,
+): Promise<AppleStatusResponse> {
+  await Promise.all([
+    enabled
+      ? convex.mutation(api.settings.set, {
+          key: APPLE_ENABLED_KEY,
+          value: "true",
+        })
+      : Promise.resolve(),
+    enabled
+      ? convex.mutation(api.settings.set, {
+          key: APPLE_NOTES_ENABLED_KEY,
+          value: "true",
+        })
+      : Promise.resolve(),
+    convex.mutation(api.settings.set, {
+      key: APPLE_NOTES_WRITE_ENABLED_KEY,
       value: enabled ? "true" : "false",
     }),
   ]);
@@ -163,6 +197,22 @@ export function createAppleRouter(): express.Router {
   router.post("/notes/disable", async (_req, res) => {
     try {
       res.json(await setAppleSourceEnabled("notes", false));
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  router.post("/notes/write/enable", async (_req, res) => {
+    try {
+      res.json(await setAppleNotesWriteEnabled(true));
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  router.post("/notes/write/disable", async (_req, res) => {
+    try {
+      res.json(await setAppleNotesWriteEnabled(false));
     } catch (err) {
       res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
     }

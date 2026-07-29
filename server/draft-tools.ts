@@ -98,6 +98,11 @@ payload JSON: ${draft.payload}`;
           conversationId,
           name: `send:${draft.kind}`,
           runtimeConfig,
+          approvedDraft: {
+            draftId: draft.draftId,
+            kind: draft.kind,
+            payload: draft.payload,
+          },
         });
         return runtimeText(`Draft ${args.draftId} executed.\n\n${res.result}`);
       },

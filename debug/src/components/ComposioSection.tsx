@@ -54,6 +54,7 @@ interface AppleStatus {
   enabled: boolean;
   messagesEnabled: boolean;
   notesEnabled: boolean;
+  notesWriteEnabled: boolean;
   remindersEnabled: boolean;
   bridge: AppleBridgeStatus;
 }
@@ -392,6 +393,7 @@ const DEMO_APPLE_STATUS: AppleStatus = {
   enabled: true,
   messagesEnabled: true,
   notesEnabled: true,
+  notesWriteEnabled: true,
   remindersEnabled: true,
   bridge: {
     running: true,
@@ -589,6 +591,7 @@ export function ComposioSection({ isDark }: { isDark: boolean }) {
         enabled: false,
         messagesEnabled: false,
         notesEnabled: false,
+        notesWriteEnabled: false,
         remindersEnabled: false,
         bridge: {
           running: false,
@@ -656,6 +659,42 @@ export function ComposioSection({ isDark }: { isDark: boolean }) {
       setBusy(null);
     }
   }, [showToast]);
+
+  const toggleAppleNotesWrite = useCallback(
+    async (enabled: boolean) => {
+      if (
+        enabled &&
+        !window.confirm(
+          "Allow Boop to create Apple Notes and, after your explicit approval, append to or update existing notes?",
+        )
+      ) {
+        return;
+      }
+      setBusy("apple:notes-write");
+      try {
+        const r = await fetch(`/api/apple/notes/write/${enabled ? "enable" : "disable"}`, {
+          method: "POST",
+        });
+        if (!r.ok) {
+          const err = await r.json().catch(() => ({}));
+          showToast(`Apple Notes write access failed: ${err?.error ?? r.statusText}`);
+          return;
+        }
+        setAppleStatus((await r.json()) as AppleStatus);
+        showToast(
+          enabled
+            ? "Apple Notes writing enabled. Existing-note changes still require confirmation."
+            : "Apple Notes writing disabled.",
+          "info",
+        );
+      } catch (err) {
+        showToast(`Apple Notes write access failed: ${String(err)}`);
+      } finally {
+        setBusy(null);
+      }
+    },
+    [showToast],
+  );
 
   const requestRemindersAccess = useCallback(async () => {
     setBusy("apple:reminders");
@@ -906,7 +945,7 @@ export function ComposioSection({ isDark }: { isDark: boolean }) {
       {showLocalAppleConnectors && (
         <SubsectionGrid
           label="Local Mac"
-          hint="Read-only, private to this computer"
+          hint="Private to this computer; Apple Notes writes are opt-in"
           isDark={isDark}
         >
           <IMessageConnectionCard
@@ -924,12 +963,13 @@ export function ComposioSection({ isDark }: { isDark: boolean }) {
           <AppleNotesConnectionCard
             status={visibleAppleStatus}
             loaded={visibleAppleLoaded}
-            busy={busy === "apple:notes"}
+            busy={busy === "apple:notes" || busy === "apple:notes-write"}
             cardBg={cardBg}
             muted={muted}
             isDark={isDark}
             demoMode={demoModeEnabled}
             onToggle={(enabled) => toggleAppleSource("notes", enabled)}
+            onToggleWrite={toggleAppleNotesWrite}
             onRefresh={fetchAppleStatus}
             onRequestNotesAccess={requestNotesAccess}
             onOpenAutomationSettings={() => openAutomationSettings("notes")}
@@ -1224,6 +1264,7 @@ function AppleNotesConnectionCard({
   isDark,
   demoMode,
   onToggle,
+  onToggleWrite,
   onRefresh,
   onRequestNotesAccess,
   onOpenAutomationSettings,
@@ -1236,11 +1277,13 @@ function AppleNotesConnectionCard({
   isDark: boolean;
   demoMode?: boolean;
   onToggle: (enabled: boolean) => void;
+  onToggleWrite: (enabled: boolean) => void;
   onRefresh: () => void;
   onRequestNotesAccess: () => void;
   onOpenAutomationSettings: () => void;
 }) {
   const enabled = status?.notesEnabled ?? false;
+  const writeEnabled = status?.notesWriteEnabled ?? false;
   const bridge = status?.bridge ?? null;
   const permission = bridge?.permissions?.notes;
   const state = appleNotesConnectionState(status, loaded);
@@ -1260,11 +1303,11 @@ function AppleNotesConnectionCard({
                 isDark ? "bg-emerald-400/10 text-emerald-300" : "bg-emerald-50 text-emerald-700"
               }`}
             >
-              Read-only
+              {writeEnabled ? "Read + write" : "Read-only"}
             </span>
           </div>
           <p className={`text-xs ${muted} leading-snug mt-0.5 line-clamp-2`}>
-            Searches and reads local Apple Notes from this Mac. Requires macOS Automation permission for Notes.
+            Searches and reads local notes. Writing is a separate opt-in and existing-note changes require approval.
           </p>
           <div className="mt-1.5 flex flex-wrap items-center gap-2">
             <span className={`inline-flex items-center gap-1.5 text-xs ${state.textClass}`}>
@@ -1314,6 +1357,45 @@ function AppleNotesConnectionCard({
         )}
       </div>
 
+      {enabled && !demoMode && (
+        <div
+          className={`mt-3 flex flex-col gap-2 rounded-xl border px-3 py-2.5 sm:flex-row sm:items-center sm:justify-between ${
+            writeEnabled
+              ? isDark
+                ? "border-amber-400/25 bg-amber-400/10"
+                : "border-amber-200 bg-amber-50"
+              : isDark
+                ? "border-white/10 bg-white/[0.03]"
+                : "border-zinc-200 bg-zinc-50"
+          }`}
+        >
+          <div>
+            <div className={`text-xs font-medium ${isDark ? "text-zinc-200" : "text-zinc-800"}`}>
+              Allow writes
+            </div>
+            <div className={`mt-0.5 text-[11px] leading-relaxed ${muted}`}>
+              Create notes directly. Append or update only after a draft is explicitly approved.
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => onToggleWrite(!writeEnabled)}
+            disabled={busy}
+            className={`shrink-0 rounded-xl px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50 ${
+              writeEnabled
+                ? isDark
+                  ? "border border-amber-300/25 text-amber-200 hover:bg-amber-300/10"
+                  : "border border-amber-300 text-amber-800 hover:bg-amber-100"
+                : isDark
+                  ? "bg-zinc-100 text-zinc-950 hover:bg-white"
+                  : "bg-zinc-950 text-white hover:bg-zinc-800"
+            }`}
+          >
+            {busy ? "Working..." : writeEnabled ? "Disable writes" : "Enable writes"}
+          </button>
+        </div>
+      )}
+
       {enabled && !bridge?.running && (
         <div
           className={`mt-3 rounded-xl border px-3 py-2 text-xs leading-relaxed ${
@@ -1322,7 +1404,7 @@ function AppleNotesConnectionCard({
               : "border-amber-200 bg-amber-50 text-amber-800"
           }`}
         >
-          Apple Notes reads only work on macOS. Run Boop on the Mac whose Notes you want to read.
+          Apple Notes access only works on macOS. Run Boop on the Mac whose Notes you want to use.
           {bridge?.error && <span className="block mt-1 mono text-[11px] opacity-80">{bridge.error}</span>}
         </div>
       )}
@@ -1341,7 +1423,7 @@ function AppleNotesConnectionCard({
         >
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <span>
-              Allow the app running Boop to control Notes. Boop only exposes read-only note tools.
+              Allow the app running Boop to control Notes. Writes remain off unless you enable them separately.
             </span>
             <div className="flex shrink-0 flex-wrap gap-2">
               <button

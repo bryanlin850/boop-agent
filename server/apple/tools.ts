@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { ApprovedDraftExecution } from "../draft-types.js";
 import { createClaudeMcpServer } from "../runtimes/claude.js";
 import { defineRuntimeTool } from "../runtimes/tool.js";
 import { runtimeText, type RuntimeTool } from "../runtimes/types.js";
@@ -6,13 +7,30 @@ import { redactContactHandle, redactPhoneNumbers } from "../privacy.js";
 import { getAppleSettings } from "../runtime-config.js";
 import { appleBridgeRequest, readBridgeInfo } from "./client.js";
 import { listLocalChats, readLocalMessages } from "./messages-local.js";
-import { readLocalNote, searchLocalNotes } from "./notes-local.js";
+import {
+  APPLE_NOTE_VERSION_PATTERN,
+  appendLocalNote,
+  createLocalNote,
+  readLocalNote,
+  searchLocalNotes,
+  updateLocalNote,
+} from "./notes-local.js";
 import { listLocalReminders } from "./reminders-local.js";
 
 const NAMESPACE = "apple";
 
 const LOCAL_NOTE =
-  "Read-only data that lives on the user's Mac. iMessage reads run from the local Mac server with Full Disk Access; Apple Notes and Reminders reads run from the local Mac server with Automation permission; Calendar uses the optional Apple bridge.";
+  "Local data from the user's Mac. iMessage and Reminders are read-only. Apple Notes writes require a separate opt-in; Calendar uses the optional Apple bridge.";
+const NOTES_WRITE_LIMIT = 40_000;
+const APPLE_NOTE_WRITE_TOOLS = new Set([
+  "apple_create_note",
+  "apple_append_note",
+  "apple_update_note",
+]);
+
+interface AppleToolOptions {
+  approvedDraft?: ApprovedDraftExecution;
+}
 
 const MESSAGE_TEXT_LIMIT = 500;
 
@@ -66,6 +84,7 @@ interface BridgeNoteSummary {
   name: string;
   folder: string;
   modifiedAt: string | null;
+  version?: string;
   snippet: string;
 }
 
@@ -128,10 +147,11 @@ function formatReminder(reminder: BridgeReminder): string {
 
 function formatNoteSummary(note: BridgeNoteSummary): string {
   const modified = note.modifiedAt ? ` — modified ${note.modifiedAt}` : "";
+  const version = note.version ? ` — version ${note.version}` : "";
   const name = redactPhoneNumbers(note.name);
   const folder = redactPhoneNumbers(note.folder);
   const snippet = redactPhoneNumbers(note.snippet);
-  return `${name} (${note.id}) — folder ${folder}${modified}\n  ${snippet}`;
+  return `${name} (${note.id}) — folder ${folder}${modified}${version}\n  ${snippet}`;
 }
 
 async function messagesEnabled(): Promise<boolean> {
@@ -140,6 +160,10 @@ async function messagesEnabled(): Promise<boolean> {
 
 async function notesEnabled(): Promise<boolean> {
   return (await getAppleSettings()).notesEnabled;
+}
+
+async function notesWriteEnabled(): Promise<boolean> {
+  return (await getAppleSettings()).notesWriteEnabled;
 }
 
 async function remindersEnabled(): Promise<boolean> {
@@ -226,6 +250,50 @@ async function getNote(noteId: string): Promise<BridgeNote> {
   return note;
 }
 
+function canonicalPayload(value: unknown): string | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const entries = Object.entries(record).filter(([, item]) => item !== undefined);
+  if (entries.some(([, item]) => typeof item !== "string")) return null;
+  return JSON.stringify(
+    Object.fromEntries(
+      entries.sort(([left], [right]) => left.localeCompare(right)),
+    ),
+  );
+}
+
+function requireApprovedNoteDraft(
+  approvedDraft: ApprovedDraftExecution | undefined,
+  expectedKind: "apple.notes.append" | "apple.notes.update",
+  expectedPayload: Record<string, string | undefined>,
+  consumed: boolean,
+): void {
+  if (consumed) {
+    throw new Error("This approved Apple Notes change has already been applied.");
+  }
+  if (!approvedDraft) {
+    throw new Error(
+      "Changing an existing Apple Note requires user confirmation. Save this action as a draft and apply it only after the user approves it.",
+    );
+  }
+  if (approvedDraft.kind !== expectedKind) {
+    throw new Error(
+      `Approved draft ${approvedDraft.draftId} is for ${approvedDraft.kind}, not ${expectedKind}.`,
+    );
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(approvedDraft.payload);
+  } catch {
+    throw new Error(`Approved draft ${approvedDraft.draftId} has invalid JSON.`);
+  }
+  if (canonicalPayload(parsed) !== canonicalPayload(expectedPayload)) {
+    throw new Error(
+      `Apple Notes arguments do not exactly match approved draft ${approvedDraft.draftId}.`,
+    );
+  }
+}
+
 async function listReminders(filters: {
   list?: string;
   include_completed?: boolean;
@@ -256,8 +324,12 @@ async function listReminders(filters: {
   return reminders;
 }
 
-export function createAppleTools(namespace = NAMESPACE): RuntimeTool[] {
-  return [
+export function createAppleTools(
+  namespace = NAMESPACE,
+  options: AppleToolOptions = {},
+): RuntimeTool[] {
+  let approvedDraftConsumed = false;
+  const tools = [
     defineRuntimeTool(
       namespace,
       "apple_list_chats",
@@ -404,9 +476,133 @@ export function createAppleTools(namespace = NAMESPACE): RuntimeTool[] {
           return `${redactPhoneNumbers(note.name)} (folder ${redactPhoneNumbers(note.folder)})\n\n${redactPhoneNumbers(note.body)}`;
         }),
     ),
+    defineRuntimeTool(
+      namespace,
+      "apple_create_note",
+      `Create a new Apple Note from a plaintext title and body. This is allowed only when Apple Notes writing is separately enabled. A folder name or id is optional; omit it to use the default Notes folder. ${LOCAL_NOTE}`,
+      {
+        title: z.string().trim().min(1).max(500).describe("Title for the new note."),
+        body: z
+          .string()
+          .max(NOTES_WRITE_LIMIT)
+          .optional()
+          .describe("Plaintext note body. Newlines are preserved."),
+        folder: z
+          .string()
+          .trim()
+          .min(1)
+          .optional()
+          .describe("Optional Apple Notes folder name or id."),
+      },
+      async ({ title, body, folder }) =>
+        wrap(async () => {
+          if (!(await notesWriteEnabled())) {
+            return "Apple Notes writing is disabled. Turn on Allow writes for Apple Notes under Connections → Local Mac.";
+          }
+          const note = await createLocalNote({ title, body, folder });
+          return `Created Apple Note "${redactPhoneNumbers(note.name)}" (${note.id}) in folder ${redactPhoneNumbers(note.folder)}.`;
+        }),
+    ),
+    defineRuntimeTool(
+      namespace,
+      "apple_append_note",
+      `Append plaintext to an existing Apple Note. NEVER call this during the initial request. First save a draft with kind "apple.notes.append" and payload JSON exactly {"note_id":"…","content":"…","expected_version":"…"}, using the note id and ASCII version token from apple_search_notes. This tool only runs after send_draft supplies that exact approved payload. ${LOCAL_NOTE}`,
+      {
+        note_id: z.string().trim().min(1).describe("Note id returned by apple_search_notes."),
+        content: z
+          .string()
+          .min(1)
+          .max(NOTES_WRITE_LIMIT)
+          .describe("Plaintext content to append."),
+        expected_version: z
+          .string()
+          .trim()
+          .regex(APPLE_NOTE_VERSION_PATTERN)
+          .describe("Exact content-backed version token returned by apple_search_notes before approval."),
+      },
+      async ({ note_id, content, expected_version }) =>
+        wrap(async () => {
+          if (!(await notesWriteEnabled())) {
+            return "Apple Notes writing is disabled. Turn on Allow writes for Apple Notes under Connections → Local Mac.";
+          }
+          requireApprovedNoteDraft(
+            options.approvedDraft,
+            "apple.notes.append",
+            {
+              note_id,
+              content,
+              expected_version,
+            },
+            approvedDraftConsumed,
+          );
+          const note = await appendLocalNote(note_id, content, expected_version);
+          approvedDraftConsumed = true;
+          return `Appended to Apple Note "${redactPhoneNumbers(note.name)}" (${note.id}).`;
+        }),
+    ),
+    defineRuntimeTool(
+      namespace,
+      "apple_update_note",
+      `Replace the title, plaintext body, or both on an existing Apple Note. NEVER call this during the initial request. First save a draft with kind "apple.notes.update" and payload JSON containing exactly note_id, expected_version, and whichever of title/body will change. Use the note id and ASCII version token from apple_search_notes. This tool only runs after send_draft supplies that exact approved payload. ${LOCAL_NOTE}`,
+      {
+        note_id: z.string().trim().min(1).describe("Note id returned by apple_search_notes."),
+        expected_version: z
+          .string()
+          .trim()
+          .regex(APPLE_NOTE_VERSION_PATTERN)
+          .describe("Exact content-backed version token returned by apple_search_notes before approval."),
+        title: z.string().trim().min(1).max(500).optional().describe("Replacement note title."),
+        body: z
+          .string()
+          .max(NOTES_WRITE_LIMIT)
+          .optional()
+          .describe("Replacement plaintext body. Newlines are preserved."),
+      },
+      async ({ note_id, expected_version, title, body }) =>
+        wrap(async () => {
+          if (!(await notesWriteEnabled())) {
+            return "Apple Notes writing is disabled. Turn on Allow writes for Apple Notes under Connections → Local Mac.";
+          }
+          if (title === undefined && body === undefined) {
+            throw new Error("Apple Note update requires a title or body.");
+          }
+          requireApprovedNoteDraft(
+            options.approvedDraft,
+            "apple.notes.update",
+            {
+              note_id,
+              expected_version,
+              title,
+              body,
+            },
+            approvedDraftConsumed,
+          );
+          const note = await updateLocalNote(note_id, {
+            title,
+            body,
+            expectedVersion: expected_version,
+          });
+          approvedDraftConsumed = true;
+          return `Updated Apple Note "${redactPhoneNumbers(note.name)}" (${note.id}).`;
+        }),
+    ),
   ];
+
+  if (!options.approvedDraft) return tools;
+
+  const approvedWriteTool =
+    options.approvedDraft.kind === "apple.notes.append"
+      ? "apple_append_note"
+      : options.approvedDraft.kind === "apple.notes.update"
+        ? "apple_update_note"
+        : null;
+  return tools.filter(
+    (candidate) =>
+      !APPLE_NOTE_WRITE_TOOLS.has(candidate.name) ||
+      candidate.name === approvedWriteTool,
+  );
 }
 
-export function createAppleMcp() {
-  return createClaudeMcpServer(NAMESPACE, createAppleTools(NAMESPACE));
+export function createAppleMcp(options: AppleToolOptions = {}) {
+  return createClaudeMcpServer(NAMESPACE, createAppleTools(NAMESPACE, options));
 }

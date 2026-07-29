@@ -6,10 +6,10 @@ export function registerAppleIntegration(): void {
   registerIntegration({
     name: "apple",
     description:
-      "Read-only Apple data from the user's Mac: iMessage history, Apple Notes, and Apple Reminders via the local server, plus Apple Calendar events via the optional Apple bridge.",
+      "Local Apple data from the user's Mac: read-only iMessage and Reminders, Apple Notes with optional guarded writes, plus Apple Calendar events via the optional Apple bridge.",
     isEnabled: async () => (await getAppleSettings()).enabled,
-    createServer: async () => createAppleMcp(),
-    createTools: async () => createAppleTools(),
+    createServer: async (ctx) => createAppleMcp({ approvedDraft: ctx.approvedDraft }),
+    createTools: async (ctx) => createAppleTools("apple", { approvedDraft: ctx.approvedDraft }),
   });
   console.log("[apple] registered Apple data integration");
 }

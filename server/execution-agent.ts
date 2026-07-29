@@ -8,6 +8,7 @@ import {
   listIntegrations,
 } from "./integrations/registry.js";
 import { createDraftStagingTools } from "./draft-tools.js";
+import type { ApprovedDraftExecution } from "./draft-types.js";
 import { createFilesMcp } from "./file-tools.js";
 import { EMPTY_USAGE, type UsageTotals } from "./usage.js";
 import { getRuntimeConfig, type RuntimeConfig } from "./runtime-config.js";
@@ -72,6 +73,7 @@ export function redactToolInputForLog(toolName: string, input: unknown): unknown
 function buildExecutionSystem(
   patchrightEnabled: boolean,
   automationNotifyEnabled: boolean,
+  approvedDraft?: ApprovedDraftExecution,
 ): string {
   const toolsLine = patchrightEnabled
     ? "2. Use your tools — search_reddit for Reddit-specific research, WebSearch, WebFetch, browser tools (when present) for real Chrome automation, and any integrations loaded for this spawn — to investigate and act."
@@ -79,6 +81,13 @@ function buildExecutionSystem(
   const browserDiscipline = patchrightEnabled
     ? "- Reach for browser tools when WebFetch returns a stub/blocked page, when the page needs JavaScript, login, clicks, scrolling, or form input. Tools: browser_navigate, browser_click, browser_type, browser_get_state, browser_extract_content, browser_scroll, browser_go_back, browser_list_tabs, browser_switch_tab, browser_screenshot. Always close sessions with browser_close_all when done.\n- browser_screenshot saves to the user's files store and returns a url. Use it whenever the user asks to SEE something or visual confirmation matters; include the returned url on its own line in your final answer so iMessage previews the image.\n"
     : "";
+  const safetyRules = approvedDraft
+    ? `- This run was created by send_draft after the user approved draft ${approvedDraft.draftId}. Execute only that draft's exact payload. Do not save it as another draft.
+- Do not perform any additional external action that is not in the approved payload. Stage any newly discovered action with save_draft.`
+    : `- Anything that sends a message, creates an event, or takes an external action: call save_draft with a JSON payload instead of the real send/create tool. Return the summary so the interaction agent can show it to the user.
+- A brand-new Apple Note may be created directly when the user explicitly requested it and Apple Notes writing is enabled.
+- Appending to or updating an existing Apple Note must be staged with save_draft. Follow the Apple tool's documented draft kind and payload exactly.
+- Only the interaction agent's send_draft tool commits. You never commit a staged action.`;
   return `You are a focused background worker for the user.
 
 Your job:
@@ -99,7 +108,7 @@ Local browser:
 - After browser_request_login, stop and tell the user what to do next. Do not claim the task is complete until they confirm they logged in.
 
 Apple data:
-- If the "apple" integration is loaded, its tools return read-only local Apple data from the user's Mac. iMessage reads run from the local server with Full Disk Access; Apple Notes and Apple Reminders read from the local server with macOS Automation permission; Apple Calendar uses the optional Apple bridge. They never modify anything.
+- If the "apple" integration is loaded, its tools access local Apple data from the user's Mac. iMessage and Reminders remain read-only. Apple Notes can create notes only when the separate write toggle is enabled; appending to or updating an existing note requires the draft approval flow. Apple Calendar uses the optional Apple bridge.
 - Never include phone numbers in your response. For iMessage/SMS lookups, refer to contact names, message text, timing, or "the matching thread" instead of phone numbers.
 
 MANDATORY: for any task that used WebSearch or WebFetch, end your response with
@@ -137,8 +146,7 @@ Files cache:
   contract Anna sent."
 
 Safety:
-- Anything that sends a message, creates an event, or takes an external action: call save_draft with a JSON payload instead of the real send/create tool. Return the summary so the interaction agent can show it to the user.
-- Only the interaction agent's send_draft tool commits. You never commit.${
+${safetyRules}${
     automationNotifyEnabled
       ? `
 
@@ -172,6 +180,7 @@ export interface SpawnOptions {
   conversationId?: string;
   name?: string;
   runtimeConfig?: RuntimeConfig;
+  approvedDraft?: ApprovedDraftExecution;
   imageStorageIds?: string[];
   /**
    * When true, the agent gets a `notify` tool and silence-is-default semantics.
@@ -253,7 +262,11 @@ export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promis
   const draftTools = opts.conversationId ? createDraftStagingTools(opts.conversationId) : [];
 
   const integrationServers = isClaudeRuntime
-    ? await buildMcpServersForIntegrations(opts.integrations, opts.conversationId)
+    ? await buildMcpServersForIntegrations(
+        opts.integrations,
+        opts.conversationId,
+        opts.approvedDraft,
+      )
     : {};
   let pendingMediaUrl: string | undefined;
   const integrationTools =
@@ -264,6 +277,7 @@ export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promis
           (url) => {
             pendingMediaUrl = url;
           },
+          opts.approvedDraft,
         )
       : [];
 
@@ -313,7 +327,11 @@ export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promis
     });
     const result = await runAgentRuntime(runtimeConfig, {
       prompt: executionPrompt,
-      systemPrompt: buildExecutionSystem(patchrightEnabled, !!opts.automationNotify),
+      systemPrompt: buildExecutionSystem(
+        patchrightEnabled,
+        !!opts.automationNotify,
+        opts.approvedDraft,
+      ),
       claudeMcpServers: mcpServers,
       tools: runtimeTools,
       allowedTools,

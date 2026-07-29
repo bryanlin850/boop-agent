@@ -77,6 +77,45 @@ describe("buildIntegrationSummary", () => {
     ).toEqual([]);
   });
 
+  it("marks Apple and every configured source unavailable without a runtime", () => {
+    expect(
+      buildIntegrationSummary(
+        [],
+        ["apple"],
+        {
+          enabled: true,
+          messagesEnabled: true,
+          notesEnabled: true,
+          notesWriteEnabled: true,
+          remindersEnabled: true,
+        },
+        {
+          running: false,
+          source: "unavailable",
+          permissions: null,
+        },
+      ),
+    ).toEqual([
+      {
+        slug: "apple",
+        status: "UNAVAILABLE",
+        account: "Local Mac",
+        connectionId: null,
+        kind: "local",
+        sources: {
+          imessage: { enabled: false, permission: null },
+          notes: {
+            enabled: false,
+            writeEnabled: false,
+            permission: null,
+          },
+          reminders: { enabled: false, permission: null },
+          calendar: { enabled: false, permission: null },
+        },
+      },
+    ]);
+  });
+
   it("includes other enabled local integrations", () => {
     expect(
       buildIntegrationSummary(

@@ -63,28 +63,30 @@ export function buildIntegrationSummary(
 
     if (name === "apple" && appleSettings.enabled) {
       const permissions = appleStatus?.permissions;
+      const appleAvailable =
+        appleStatus?.running === true && appleStatus.source !== "unavailable";
       summary.push({
         slug: "apple",
-        status: "ACTIVE",
+        status: appleAvailable ? "ACTIVE" : "UNAVAILABLE",
         account: "Local Mac",
         connectionId: null,
         kind: "local",
         sources: {
           imessage: {
-            enabled: appleSettings.messagesEnabled,
+            enabled: appleAvailable && appleSettings.messagesEnabled,
             permission: permissions?.messages ?? null,
           },
           notes: {
-            enabled: appleSettings.notesEnabled,
-            writeEnabled: appleSettings.notesWriteEnabled,
+            enabled: appleAvailable && appleSettings.notesEnabled,
+            writeEnabled: appleAvailable && appleSettings.notesWriteEnabled,
             permission: permissions?.notes ?? null,
           },
           reminders: {
-            enabled: appleSettings.remindersEnabled,
+            enabled: appleAvailable && appleSettings.remindersEnabled,
             permission: permissions?.reminders ?? null,
           },
           calendar: {
-            enabled: appleStatus?.running === true && appleStatus.source === "desktop-bridge",
+            enabled: appleAvailable && appleStatus.source === "desktop-bridge",
             permission: permissions?.calendars ?? null,
           },
         },

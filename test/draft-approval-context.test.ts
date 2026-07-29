@@ -19,6 +19,8 @@ vi.mock("../server/execution-agent.js", () => ({
 
 import { createDraftDecisionTools } from "../server/draft-tools.js";
 
+const NOTE_VERSION = "a".repeat(64);
+
 describe("approved draft execution context", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -30,7 +32,7 @@ describe("approved draft execution context", () => {
       payload: JSON.stringify({
         note_id: "note-1",
         content: "Approved text",
-        expected_version: "20260724090000",
+        expected_version: NOTE_VERSION,
       }),
       status: "pending",
     });
@@ -63,7 +65,7 @@ describe("approved draft execution context", () => {
           payload: JSON.stringify({
             note_id: "note-1",
             content: "Approved text",
-            expected_version: "20260724090000",
+            expected_version: NOTE_VERSION,
           }),
         },
       }),

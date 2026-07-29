@@ -482,7 +482,7 @@ Turn it on from the debug dashboard, either in the browser during local developm
 5. Use **Disconnect** to turn any source off again.
 6. To allow Apple Notes writes, open the Apple Notes connection card and enable **Allow writes**. Disabling or disconnecting Apple Notes turns writes off.
 
-With writes enabled, Boop exposes `apple_create_note`, `apple_append_note`, and `apple_update_note`. Creating a new note can run from an explicit request. Appending to or updating an existing note is staged as a draft and runs only after the user approves it. Approved changes carry an ASCII-only version token derived from the note's prior modification date, so Boop refuses to overwrite a note that changed while approval was pending without relying on locale-formatted date text. There is no delete-note tool.
+With writes enabled, Boop exposes `apple_create_note`, `apple_append_note`, and `apple_update_note`. Creating a new note can run from an explicit request. Appending to or updating an existing note is staged as a draft and runs only after the user approves it. Approved changes carry an ASCII-only SHA-256 version token derived from the note's modification time, title, and HTML body, so Boop refuses to overwrite a note whose content changed while approval was pending, including another edit within the same second. During approved execution, only the exact authorized Notes write tool is exposed. There is no delete-note tool.
 
 You can also view the overall Apple status from **Settings → Apple data**. Dashboard changes are stored in Convex's `settings` table and override `.env.local` fallbacks. The env vars in `.env.example` are useful for first-run defaults, but they are not required.
 

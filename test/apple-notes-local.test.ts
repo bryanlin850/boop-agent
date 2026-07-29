@@ -14,7 +14,11 @@ describe("Apple Notes plaintext conversion", () => {
   });
 
   it("accepts only the ASCII version token used by the stale-write guard", () => {
-    expect(normalizeAppleNoteVersion("20260728092831")).toBe("20260728092831");
+    const version = "a".repeat(64);
+    expect(normalizeAppleNoteVersion(version)).toBe(version);
+    expect(() => normalizeAppleNoteVersion("20260728092831")).toThrow(
+      "version is invalid",
+    );
     expect(() =>
       normalizeAppleNoteVersion("Tuesday, July 28, 2026 at 9:28:31 PM"),
     ).toThrow("version is invalid");

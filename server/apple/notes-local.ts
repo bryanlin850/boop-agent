@@ -12,7 +12,7 @@ const NOTES_TIMEOUT_MS = 15_000;
 const NOTES_MAX_BUFFER = 5 * 1024 * 1024;
 const NOTE_BODY_LIMIT = 40_000;
 const NOTE_WRITE_LIMIT = 40_000;
-export const APPLE_NOTE_VERSION_PATTERN = /^\d{14}$/;
+export const APPLE_NOTE_VERSION_PATTERN = /^[a-f0-9]{64}$/;
 
 export const LOCAL_NOTES_UNSUPPORTED_MESSAGE =
   "Local Apple Notes access is only available on macOS.";
@@ -421,11 +421,35 @@ on dateVersion(dateValue)
   return yearText & monthText & dayText & hourText & minuteText & secondText
 end dateVersion
 
+on sha256Text(sourceText)
+  set inputPath to system attribute "BOOP_NOTES_INPUT_PATH"
+  set versionPath to inputPath & ".version"
+  set versionFile to missing value
+  try
+    set versionFile to open for access POSIX file versionPath with write permission
+    set eof of versionFile to 0
+    write sourceText to versionFile as «class utf8»
+    close access versionFile
+  on error errorMessage number errorNumber
+    try
+      if versionFile is not missing value then close access versionFile
+    end try
+    error errorMessage number errorNumber
+  end try
+  set digestOutput to do shell script "/usr/bin/shasum -a 256 -- " & quoted form of versionPath
+  return word 1 of digestOutput
+end sha256Text
+
 on noteVersion(aNote)
   tell application "Notes"
     set modifiedDate to modification date of aNote
+    set noteName to name of aNote as text
+    set noteBody to body of aNote as text
   end tell
-  return my dateVersion(modifiedDate)
+  set versionSource to "modified:" & my dateVersion(modifiedDate) & linefeed & ¬
+    "name-length:" & (length of noteName) & linefeed & noteName & linefeed & ¬
+    "body-length:" & (length of noteBody) & linefeed & noteBody
+  return my sha256Text(versionSource)
 end noteVersion
 
 on noteSnippet(bodyText)

@@ -22,6 +22,11 @@ const NAMESPACE = "apple";
 const LOCAL_NOTE =
   "Local data from the user's Mac. iMessage and Reminders are read-only. Apple Notes writes require a separate opt-in; Calendar uses the optional Apple bridge.";
 const NOTES_WRITE_LIMIT = 40_000;
+const APPLE_NOTE_WRITE_TOOLS = new Set([
+  "apple_create_note",
+  "apple_append_note",
+  "apple_update_note",
+]);
 
 interface AppleToolOptions {
   approvedDraft?: ApprovedDraftExecution;
@@ -324,7 +329,7 @@ export function createAppleTools(
   options: AppleToolOptions = {},
 ): RuntimeTool[] {
   let approvedDraftConsumed = false;
-  return [
+  const tools = [
     defineRuntimeTool(
       namespace,
       "apple_list_chats",
@@ -513,7 +518,7 @@ export function createAppleTools(
           .string()
           .trim()
           .regex(APPLE_NOTE_VERSION_PATTERN)
-          .describe("Exact 14-digit version token returned by apple_search_notes before approval."),
+          .describe("Exact content-backed version token returned by apple_search_notes before approval."),
       },
       async ({ note_id, content, expected_version }) =>
         wrap(async () => {
@@ -545,7 +550,7 @@ export function createAppleTools(
           .string()
           .trim()
           .regex(APPLE_NOTE_VERSION_PATTERN)
-          .describe("Exact 14-digit version token returned by apple_search_notes before approval."),
+          .describe("Exact content-backed version token returned by apple_search_notes before approval."),
         title: z.string().trim().min(1).max(500).optional().describe("Replacement note title."),
         body: z
           .string()
@@ -582,6 +587,20 @@ export function createAppleTools(
         }),
     ),
   ];
+
+  if (!options.approvedDraft) return tools;
+
+  const approvedWriteTool =
+    options.approvedDraft.kind === "apple.notes.append"
+      ? "apple_append_note"
+      : options.approvedDraft.kind === "apple.notes.update"
+        ? "apple_update_note"
+        : null;
+  return tools.filter(
+    (candidate) =>
+      !APPLE_NOTE_WRITE_TOOLS.has(candidate.name) ||
+      candidate.name === approvedWriteTool,
+  );
 }
 
 export function createAppleMcp(options: AppleToolOptions = {}) {

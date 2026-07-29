@@ -14,7 +14,7 @@ vi.mock("../server/runtime-config.js", () => ({
 }));
 
 vi.mock("../server/apple/notes-local.js", () => ({
-  APPLE_NOTE_VERSION_PATTERN: /^\d{14}$/,
+  APPLE_NOTE_VERSION_PATTERN: /^[a-f0-9]{64}$/,
   appendLocalNote: mocks.appendLocalNote,
   createLocalNote: mocks.createLocalNote,
   readLocalNote: mocks.readLocalNote,
@@ -24,12 +24,14 @@ vi.mock("../server/apple/notes-local.js", () => ({
 
 import { createAppleTools } from "../server/apple/tools.js";
 
+const NOTE_VERSION = "a".repeat(64);
+
 const note = {
   id: "note-1",
   name: "Project plan",
   folder: "Notes",
   modifiedAt: "Friday, July 24, 2026 at 9:00:00 AM",
-  version: "20260724090000",
+  version: NOTE_VERSION,
   body: "Body",
 };
 
@@ -100,6 +102,39 @@ describe("guarded Apple Notes write tools", () => {
       body: "Body",
       folder: "Notes",
     });
+  });
+
+  it("exposes only the approved Apple Notes write tool during draft execution", () => {
+    const names = createAppleTools("apple", {
+      approvedDraft: {
+        draftId: "draft-1",
+        kind: "apple.notes.append",
+        payload: JSON.stringify({
+          note_id: note.id,
+          content: "Approved text",
+          expected_version: note.version,
+        }),
+      },
+    }).map((candidate) => candidate.name);
+
+    expect(names).toContain("apple_append_note");
+    expect(names).not.toContain("apple_create_note");
+    expect(names).not.toContain("apple_update_note");
+  });
+
+  it("exposes no Apple Notes write tools for a non-Notes approved draft", () => {
+    const names = createAppleTools("apple", {
+      approvedDraft: {
+        draftId: "draft-1",
+        kind: "gmail.send",
+        payload: "{}",
+      },
+    }).map((candidate) => candidate.name);
+
+    expect(names).toContain("apple_read_note");
+    expect(names).not.toContain("apple_create_note");
+    expect(names).not.toContain("apple_append_note");
+    expect(names).not.toContain("apple_update_note");
   });
 
   it("returns the ASCII version token needed for an approved edit", async () => {

@@ -19,6 +19,7 @@ const BROWSER_EXTRA_ARGS_KEY = "browser_extra_args";
 export const APPLE_ENABLED_KEY = "apple_enabled";
 export const APPLE_MESSAGES_ENABLED_KEY = "apple_messages_enabled";
 export const APPLE_NOTES_ENABLED_KEY = "apple_notes_enabled";
+export const APPLE_NOTES_WRITE_ENABLED_KEY = "apple_notes_write_enabled";
 export const APPLE_REMINDERS_ENABLED_KEY = "apple_reminders_enabled";
 const CONFIG_TTL_MS = 30 * 1000;
 const BROWSER_CONFIG_TTL_MS = 5 * 1000;
@@ -50,6 +51,7 @@ export interface AppleSettings {
   enabled: boolean;
   messagesEnabled: boolean;
   notesEnabled: boolean;
+  notesWriteEnabled: boolean;
   remindersEnabled: boolean;
 }
 
@@ -327,13 +329,18 @@ export async function getAppleSettings(): Promise<AppleSettings> {
     return cachedAppleSettings.value;
   }
 
-  const [enabled, messagesEnabled, notesEnabled, remindersEnabled] = await Promise.all([
-    getSetting(APPLE_ENABLED_KEY),
-    getSetting(APPLE_MESSAGES_ENABLED_KEY),
-    getSetting(APPLE_NOTES_ENABLED_KEY),
-    getSetting(APPLE_REMINDERS_ENABLED_KEY),
-  ]);
+  const [enabled, messagesEnabled, notesEnabled, notesWriteEnabled, remindersEnabled] =
+    await Promise.all([
+      getSetting(APPLE_ENABLED_KEY),
+      getSetting(APPLE_MESSAGES_ENABLED_KEY),
+      getSetting(APPLE_NOTES_ENABLED_KEY),
+      getSetting(APPLE_NOTES_WRITE_ENABLED_KEY),
+      getSetting(APPLE_REMINDERS_ENABLED_KEY),
+    ]);
   const appleEnabled = settingBool(enabled, process.env.BOOP_APPLE_ENABLED, false);
+  const appleNotesEnabled =
+    appleEnabled &&
+    settingBool(notesEnabled, process.env.BOOP_APPLE_NOTES_ENABLED, false);
   const value: AppleSettings = {
     enabled: appleEnabled,
     messagesEnabled:
@@ -343,9 +350,14 @@ export async function getAppleSettings(): Promise<AppleSettings> {
         process.env.BOOP_APPLE_MESSAGES_ENABLED,
         false,
       ),
-    notesEnabled:
-      appleEnabled &&
-      settingBool(notesEnabled, process.env.BOOP_APPLE_NOTES_ENABLED, false),
+    notesEnabled: appleNotesEnabled,
+    notesWriteEnabled:
+      appleNotesEnabled &&
+      settingBool(
+        notesWriteEnabled,
+        process.env.BOOP_APPLE_NOTES_WRITE_ENABLED,
+        false,
+      ),
     remindersEnabled:
       appleEnabled &&
       settingBool(

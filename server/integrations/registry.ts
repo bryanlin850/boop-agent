@@ -1,4 +1,5 @@
 import type { McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-sdk";
+import type { ApprovedDraftExecution } from "../draft-types.js";
 import type { RuntimeTool } from "../runtimes/types.js";
 
 export interface IntegrationModule {
@@ -13,6 +14,7 @@ export interface IntegrationModule {
 export interface IntegrationContext {
   conversationId?: string;
   onAttachment?: (url: string) => void;
+  approvedDraft?: ApprovedDraftExecution;
 }
 
 const registry = new Map<string, IntegrationModule>();
@@ -63,15 +65,17 @@ export async function refreshIntegrations(): Promise<void> {
 export function makeContext(
   conversationId?: string,
   onAttachment?: (url: string) => void,
+  approvedDraft?: ApprovedDraftExecution,
 ): IntegrationContext {
-  return { conversationId, onAttachment };
+  return { conversationId, onAttachment, approvedDraft };
 }
 
 export async function buildMcpServersForIntegrations(
   names: string[],
   conversationId?: string,
+  approvedDraft?: ApprovedDraftExecution,
 ): Promise<Record<string, McpSdkServerConfigWithInstance>> {
-  const ctx = makeContext(conversationId);
+  const ctx = makeContext(conversationId, undefined, approvedDraft);
   const out: Record<string, McpSdkServerConfigWithInstance> = {};
   for (const name of names) {
     const mod = registry.get(name);
@@ -96,8 +100,9 @@ export async function buildRuntimeToolsForIntegrations(
   names: string[],
   conversationId?: string,
   onAttachment?: (url: string) => void,
+  approvedDraft?: ApprovedDraftExecution,
 ): Promise<RuntimeTool[]> {
-  const ctx = makeContext(conversationId, onAttachment);
+  const ctx = makeContext(conversationId, onAttachment, approvedDraft);
   const out: RuntimeTool[] = [];
   for (const name of names) {
     const mod = registry.get(name);

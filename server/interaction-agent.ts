@@ -287,12 +287,15 @@ help. If "apple" is also relevant, use ["gmail", "apple"] instead of
 Apple-only. Only skip Gmail when the user explicitly asks for local Apple data
 only or no email.
 
-Apple data (local, read-only):
+Apple data (local):
 The optional "apple" integration reads iMessage texts, Apple Calendar events,
-Apple Reminders, and Apple Notes from the user's Mac. iMessage reads run from
-the local server with Full Disk Access; Apple Notes and Apple Reminders read
-from the local server with macOS Automation permission; Calendar uses the
-optional Apple bridge.
+Apple Reminders, and Apple Notes from the user's Mac. iMessage and Reminders
+remain read-only. Apple Notes can create notes when the separate write toggle
+is enabled. Appending to or updating an existing note goes through the normal
+draft flow and is applied only after send_draft receives the user's approval.
+iMessage reads run from the local server with Full Disk Access; Apple Notes
+and Apple Reminders use macOS Automation permission; Calendar uses the optional
+Apple bridge.
 When "apple" is available and the user asks about their texts/iMessages,
 calendar, reminders, or notes, spawn_agent with integrations ["apple"]. If it
 is not available, tell the user to enable Apple data in Settings. For iMessage,

@@ -18,6 +18,7 @@ const originalHome = process.env.HOME;
 const originalAppleEnabled = process.env.BOOP_APPLE_ENABLED;
 const originalAppleMessagesEnabled = process.env.BOOP_APPLE_MESSAGES_ENABLED;
 const originalAppleNotesEnabled = process.env.BOOP_APPLE_NOTES_ENABLED;
+const originalAppleNotesWriteEnabled = process.env.BOOP_APPLE_NOTES_WRITE_ENABLED;
 const originalAppleRemindersEnabled = process.env.BOOP_APPLE_REMINDERS_ENABLED;
 
 const BRIDGE_INFO = {
@@ -49,6 +50,7 @@ describe("apple bridge client and tools", () => {
     process.env.BOOP_APPLE_ENABLED = "true";
     process.env.BOOP_APPLE_MESSAGES_ENABLED = "true";
     delete process.env.BOOP_APPLE_NOTES_ENABLED;
+    delete process.env.BOOP_APPLE_NOTES_WRITE_ENABLED;
     delete process.env.BOOP_APPLE_REMINDERS_ENABLED;
     clearAppleSettingsCache();
   });
@@ -76,6 +78,11 @@ describe("apple bridge client and tools", () => {
       delete process.env.BOOP_APPLE_NOTES_ENABLED;
     } else {
       process.env.BOOP_APPLE_NOTES_ENABLED = originalAppleNotesEnabled;
+    }
+    if (originalAppleNotesWriteEnabled === undefined) {
+      delete process.env.BOOP_APPLE_NOTES_WRITE_ENABLED;
+    } else {
+      process.env.BOOP_APPLE_NOTES_WRITE_ENABLED = originalAppleNotesWriteEnabled;
     }
     if (originalAppleRemindersEnabled === undefined) {
       delete process.env.BOOP_APPLE_REMINDERS_ENABLED;
@@ -221,6 +228,7 @@ describe("apple bridge client and tools", () => {
   it("does not enable sources from the global Apple toggle alone", async () => {
     delete process.env.BOOP_APPLE_MESSAGES_ENABLED;
     delete process.env.BOOP_APPLE_NOTES_ENABLED;
+    delete process.env.BOOP_APPLE_NOTES_WRITE_ENABLED;
     delete process.env.BOOP_APPLE_REMINDERS_ENABLED;
     clearAppleSettingsCache();
 
@@ -230,6 +238,7 @@ describe("apple bridge client and tools", () => {
         enabled: true,
         messagesEnabled: false,
         notesEnabled: false,
+        notesWriteEnabled: false,
         remindersEnabled: false,
       });
     } finally {

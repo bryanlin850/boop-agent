@@ -8,6 +8,8 @@ import {
 import { activeProvider as activeEmbeddingProvider } from "./embeddings.js";
 import { redditSearchAvailable } from "./openai-reddit-search.js";
 import { listEnabledIntegrations } from "./integrations/registry.js";
+import { getAppleBridgeStatus } from "./apple/client.js";
+import { buildIntegrationSummary } from "./integration-summary.js";
 import { createClaudeMcpServer } from "./runtimes/claude.js";
 import { defineRuntimeTool } from "./runtimes/tool.js";
 import { runtimeText, type RuntimeReasoningEffort, type RuntimeTool } from "./runtimes/types.js";
@@ -18,6 +20,7 @@ import {
   MODEL_ALIASES,
   RUNTIME_ALIASES,
   getRuntimeConfig,
+  getAppleSettings,
   getBrowserSettings,
   resolveModelInput,
   resolveRuntimeInput,
@@ -175,16 +178,27 @@ Use when the user says "use opus", "switch to sonnet", "use Codex mini", "make i
     defineRuntimeTool(
       NAMESPACE,
       "list_integrations",
-      "List the user's currently connected integrations (Gmail, Slack, etc.) with the actual account behind each connection. Use when the user asks 'what tools do I have connected?' or 'which Gmail account?' or 'what integrations are set up?'.",
+      "List the user's currently connected integrations with the actual account behind each connection. Includes Composio accounts (Gmail, Slack, etc.) and local integrations. Apple data is reported per source so Apple Notes, Reminders, iMessage, and Calendar are not conflated. Use when the user asks 'what tools do I have connected?', 'which Gmail account?', 'can you read Apple Notes?', or 'what integrations are set up?'.",
       {},
       async () => {
-        const connected = await listConnectedToolkits();
-        const summary = connected.map((c) => ({
-          slug: c.slug,
-          status: c.status,
-          account: c.accountLabel ?? c.accountEmail ?? c.alias ?? "(unknown)",
-          connectionId: c.connectionId,
-        }));
+        const [connected, enabledIntegrations, appleSettings] = await Promise.all([
+          listConnectedToolkits(),
+          listEnabledIntegrations(),
+          getAppleSettings(),
+        ]);
+        const enabledIntegrationNames = enabledIntegrations.map((integration) => integration.name);
+        const appleStatus = enabledIntegrationNames.includes("apple")
+          ? await getAppleBridgeStatus({
+              probeNotes: appleSettings.notesEnabled,
+              probeReminders: appleSettings.remindersEnabled,
+            })
+          : null;
+        const summary = buildIntegrationSummary(
+          connected,
+          enabledIntegrationNames,
+          appleSettings,
+          appleStatus,
+        );
         return runtimeText(
           summary.length === 0
             ? "No integrations are currently connected. The user can connect new ones from the Connections panel in the debug UI."
